@@ -101,12 +101,6 @@ htmlcov/
 .streamlit/secrets.toml
 
 # ==============================================
-# Streamlit UI (KEEP config.toml)
-# ==============================================
-# .streamlit/config.toml must be committed (theme, layout, etc.)
-.streamlit/
-
-# ==============================================
 # Jupyter
 # ==============================================
 .ipynb_checkpoints/
