@@ -1,0 +1,15 @@
+[theme]
+# Couleurs principales de l'univers "Chat Horror"
+# Rouge sang pour les boutons et les éléments actifs
+primaryColor = "#8b0000"
+
+# Noir profond pour l'arrière-plan de l'application
+backgroundColor = "#111111"
+
+# Gris très sombre pour la barre latérale et les bulles de chat
+secondaryBackgroundColor = "#1b1f24"
+
+# Blanc cassé / Gris clair pour une lecture confortable
+textColor = "#e2e8f0"
+
+font = "sans serif"
