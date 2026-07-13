@@ -491,3 +491,40 @@ interroge la base pour récupérer tous les titres, applique rapidfuzz.process.e
         print()
     ```
 1) executer la commande ` uv run python test_fuzzy.py `
+
+## 1.3 Développer src/tools/scraper_tool.py ##
+
+L’objectif est simple : quand notre agent ne trouve pas assez de contexte narratif dans la base PostgreSQL (par exemple un synopsis trop court ou absent), il pourra aller chercher un texte de remplacement sur Wikipédia pour enrichir son state.
+
+requests + BeautifulSoup plutôt que Selenium car Wikipédia est une page statique (pas de JavaScript indispensable pour lire un article).
+Selenium est lourd et lent ; ici requests suffit amplement.
+On garde Selenium sous le coude si plus tard tu dois scraper un site qui nécessite un rendu navigateur (Allociné par exemple).
+
+Parser une page Wikipédia complète en HTML est très fragile : la structure interne de MediaWiki change souvent (balises imbriquées, div intermédiaires, liens [modifier], etc.).La solution professionnelle est d'utiliser l'API officielle MediaWiki : elle nous donne la liste exacte des sections d'un article, puis le contenu HTML isolé d'une seule section (par ex. Synopsis). Plus besoin de chercher le bon `<h2>` dans un arbre DOM complexe.
+
+1) Installer "beautifulsoup4" => ` uv add beautifulsoup4 requests `
+2) creer le fichier "scraper_tool.py"
+3) Crée " test_scraper.py"  à la racine :
+   
+    ```
+    from src.tools.scraper_tool import extract_wikipedia_synopsis, enrich_from_web
+
+    if __name__ == "__main__":
+        film = "Conjuring : Les Dossiers Warren"
+
+        print("=== Test 1 : synopsis brut (800 premiers caractères) ===\n")
+        synopsis = extract_wikipedia_synopsis(film)
+        print(synopsis[:800] if synopsis else "❌ Rien trouvé")
+        print("\n...\n")
+
+        print("=== Test 2 : enrichissement formaté ===\n")
+        enrichi = enrich_from_web(film)
+        print(enrichi[:800] if enrichi else "❌ Rien trouvé")
+        print("\n...\n")
+
+        print("=== Test 3 : film inexistant ===\n")
+        print(repr(enrich_from_web("FilmInexistantXYZ123")))
+
+```
+
+Pour executer le test =>  ` uv run python test_scraper.py `

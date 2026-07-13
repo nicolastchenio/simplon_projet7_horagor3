@@ -137,7 +137,7 @@ Conseil : fais-en un script one-shot (relancé seulement si le dataset change). 
 
 ### 1.3 Développer src/tools/scraper_tool.py ###
 
-- `extract_wikipedia_synopsis(movie_title: str) -> str` : scraping (Selenium/Requests) pour récupérer un synopsis Wikipédia.
+- `extract_wikipedia_synopsis(movie_title: str) -> str` : scraping (BeautifulSoup/Requests) pour récupérer un synopsis Wikipédia.
 - `enrich_from_web(movie_title: str) -> str` : appelle `extract_wikipedia_synopsis` et retourne un texte brut d'enrichissement, prêt à être injecté dans le state.
 
 ---
