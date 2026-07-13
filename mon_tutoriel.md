@@ -183,3 +183,13 @@ Comme aucun film n'a encore d'embedding de rempli, elle ne retournera aucun rés
     );
     ```
     Résultat attendu :Aucune ligne retournée (normal, aucun film n'a encore d'embedding rempli), mais pas d'erreur rouge. Tu dois juste voir les en-têtes de colonnes apparaître et un message du type Success, no rows returned.
+
+## 0.4 UI Streamlit : thème et configuration streamlit ##
+
+Créer le fichier `.streamlit/config.toml` à la racine
+
+## 0.5 Créer les outils annexes ##
+
+CréeR le fichier src/tools/horror_tools.py avec :
+- calculate_movie_age => Outil utilitaire simple (année actuelle − année du film).
+- horror_survival_simulator => Outil ludique purement algorithmique (mots-clés + scoring + random).
