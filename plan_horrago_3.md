@@ -115,6 +115,17 @@ Crée un script `data/build_faiss_index.py` :
 5. **Embedding** : vectorise avec `nomic-embed-text` via Ollama. Vérifie la dimension réelle retournée (`len(embedding)`, normalement 768) avant de créer l'index FAISS.
 6. **Index** : stocke dans `data/faiss_index/horror_index.faiss` + `metadata.pkl` (association position vectorielle → `id_film`, titre, année, source).
 
+    | Fichier | Type | Contenu exact | Taille approximative |
+    |---|---|---|---|
+    | `horror_index.faiss` | Binaire FAISS | La structure d'index + tous les vecteurs 768-dimensionnels des films. C'est le "cerveau numérique" qui permet la recherche ultra-rapide par similarité. | Quelques dizaines de Mo (dépend du nombre de films) |
+    | `metadata.pkl` | Pickle Python | Une liste ordonnée Python : `[{"id_film": 1, "titre": "...", "annee_sortie": 1973, "source": "supabase"}, ...]`. C'est le **pont** entre la position du vecteur dans FAISS et les vraies données SQL. | Quelques Ko |
+
+    data/faiss_index/ sera créé automatiquement par build_faiss_index.py à son exécution. Il contiendra ces deux fichiers et rien d'autre.
+
+    Pourquoi séparer les deux ?  
+    FAISS stocke superbement les matrices de nombres, mais il ne sait pas stocker des objets Python complexes. Le .pkl sert donc de dictionnaire de correspondance : quand FAISS te dit "le vecteur le plus proche est à l'index 42", tu vas chercher metadata[42] pour retrouver le id_film et le titre.
+    Ces fichiers sont des artefacts lourds et régénérables : ils ne doivent jamais être poussés sur GitHub.
+
 Conseil : fais-en un script one-shot (relancé seulement si le dataset change). Une fois généré, l'index est chargé en mémoire par l'API au démarrage.
 
 ### 1.2 Développer src/tools/rag_tool.py ###

@@ -193,3 +193,26 @@ Créer le fichier `.streamlit/config.toml` à la racine
 CréeR le fichier src/tools/horror_tools.py avec :
 - calculate_movie_age => Outil utilitaire simple (année actuelle − année du film).
 - horror_survival_simulator => Outil ludique purement algorithmique (mots-clés + scoring + random).
+
+# Phase 1 : La Couche Données & Vectorielle (FAISS + Supabase) #
+
+### 1.1 Générer l'index FAISS depuis Supabase ###
+
+1) rajouter `uv add psycopg2-binary ` pour pouvoir utiiser une connexion a supabase via => DATABASE_URL="postgresql://postgres.fddfdfdfkekrrerffdf:[YOUR-PASSWORD]@aws-0-eu-west-3.pooler.supabase.com:6543/postgres" plutot que une api
+2) creer le fichier " data/build_faiss_index.py"
+
+3) Vérification avant de lancer
+    ```
+    Ollama est démarré et le modèle est présent :
+    ollama pull nomic-embed-text
+    ollama list  # doit afficher nomic-embed-text
+    ```
+4) Lance le script (depuis la racine) :
+    ```
+    uv run python data/build_faiss_index.py
+    ```
+
+    Résultat attendu :
+    - Création locale de data/faiss_index/horror_index.faiss
+    - Création locale de data/faiss_index/metadata.pkl
+    - Aucun fichier binaire ne doit apparaître dans git status

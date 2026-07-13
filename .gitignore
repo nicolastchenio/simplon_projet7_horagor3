@@ -58,19 +58,22 @@ $RECYCLE.BIN/
 # ==============================================
 # Data & Models
 # ==============================================
-data/
-data/**/*
-!data/.gitkeep
+# Dossier d'index FAISS généré automatiquement (binaire, lourd, régénérable)
+data/faiss_index/
 
-# FAISS index files
+# Fichiers binaires et sérialisés générés par les scripts
 data/*.faiss
 data/*.pkl
 data/*.bin
 
-# Embeddings / vector dumps
-data/*.json    # large json dumps
-data/*.npy     # numpy embeddings arrays
+# Dumps de données et embeddings intermédiaires
+data/*.json
+data/*.npy
 data/*.npz
+
+# Conservation explicite des scripts source dans data/
+!data/.gitkeep
+!data/build_faiss_index.py
 
 # Ollama model cache (local models)
 ollama/
