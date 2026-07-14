@@ -698,3 +698,53 @@ if __name__ == "__main__":
     print("✅ 4/4 tests router isolés passés — le router est calibré.")
 ```
 3) commande pour executer le test ` uv run python test_router_iso.py `
+
+## 3.3 Node 2 : L'Agent Scraper (scraper_node) ##
+1) Dans "src/graph/nodes.py" — ajouter scraper_node
+2) Crée test_scraper_node_iso.py à la racine :
+```
+from src.graph.nodes import scraper_node
+from src.models.state import AgentState
+
+def test_scraper_avec_titre_structuré():
+    state: AgentState = {
+        "query": "film avec le clown des égouts",
+        "messages": [],
+        "rag_results": {
+            "faiss": {"best_score": 0.38, "hits": []},
+            "structured": {"movies": [{"id": 42, "title": "It"}]},
+        },
+        "scraped_data": None,
+        "needs_enrichment": None,
+        "final_answer": None,
+        "sources": None,
+        "metadata": {},
+    }
+    result = scraper_node(state)
+    assert "scraped_data" in result
+    assert result["scraped_data"]["title"] == "It"
+    assert result["scraped_data"]["success"] in (True, False)
+    print("✅ Test structuré OK")
+
+def test_scraper_fallback_query():
+    state: AgentState = {
+        "query": "The Exorcist",
+        "messages": [],
+        "rag_results": {"faiss": {"best_score": 0.2, "hits": []}, "structured": {"movies": []}},
+        "scraped_data": None,
+        "needs_enrichment": None,
+        "final_answer": None,
+        "sources": None,
+        "metadata": {},
+    }
+    result = scraper_node(state)
+    assert result["scraped_data"]["title"] == "The Exorcist"
+    print("✅ Test fallback query OK")
+
+if __name__ == "__main__":
+    test_scraper_avec_titre_structuré()
+    test_scraper_fallback_query()
+    print("✅ Tests scraper_node isolés passés")
+```
+
+3) executer la command ` uv run python test_scraper_node_iso.py `

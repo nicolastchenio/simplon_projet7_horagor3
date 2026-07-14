@@ -16,6 +16,8 @@ from langchain_core.messages import AIMessage
 from src.models.state import AgentState
 from src.tools.rag_tool import search_local_horror_lore
 from src.tools.rag_tool import query_movie_metadata  # outil structuré défini en Phase 1
+from src.tools.scraper_tool import enrich_from_web
+from langchain_core.messages import AIMessage
 
 
 def rag_node(state: AgentState) -> dict:
@@ -137,4 +139,54 @@ def rag_node(state: AgentState) -> dict:
         "rag_results": rag_results,
         "metadata": metadata,
         "messages": [ai_summary],
+    }
+    
+    
+def scraper_node(state: AgentState) -> dict:
+    """
+    Node 2 : Agent Scraper (Peer-to-Peer).
+    Se déclenche uniquement sur décision du router.
+    Lit rag_results ou query pour identifier le film, appelle enrich_from_web,
+    et écrit le résultat structuré dans scraped_data.
+    Edge fixe vers narration_node.
+    """
+    print(">>> Scraper Node")
+
+    query: str = state.get("query", "")
+    rag_results = state.get("rag_results", {})
+
+    # ── Identification du film ambigu / incomplet ──
+    movie_title: str | None = None
+
+    # Priorité 1 : titre depuis le résultat structuré (même partiel)
+    if isinstance(rag_results, dict):
+        structured = rag_results.get("structured", {})
+        if isinstance(structured, dict):
+            movies = structured.get("movies", [])
+            if movies:
+                movie_title = movies[0].get("title")
+                print(f"[Scraper] Titre extrait du SQL structuré : {movie_title}")
+
+    # Priorité 2 : fallback sur la query brute
+    if not movie_title:
+        movie_title = query.strip()
+        print(f"[Scraper] Titre fallback depuis query : {movie_title}")
+
+    # ── Appel outil web ──
+    raw_content = enrich_from_web(movie_title)
+
+    scraped_data = {
+        "title": movie_title,
+        "content": raw_content,
+        "success": bool(raw_content),
+    }
+
+    summary = (
+        f"🔍 Scraping exécuté pour « {movie_title} » — "
+        f"contenu récupéré : {'oui' if scraped_data['success'] else 'non'}"
+    )
+
+    return {
+        "scraped_data": scraped_data,
+        "messages": [AIMessage(content=summary)],
     }
