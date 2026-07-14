@@ -748,3 +748,81 @@ if __name__ == "__main__":
 ```
 
 3) executer la command ` uv run python test_scraper_node_iso.py `
+
+## 3.4 Node 3 : L'Agent Narration (narration_node) ##
+1) Dans "src/graph/nodes.py" — ajouter narration_node
+
+    | Principe plan | Réalisation dans le code |
+    |---|---|
+    | **Isolation stricte** | On lit `query`, `rag_results`, `scraped_data`. On ne parcourt **jamais** `state["messages"]`. |
+    | **Anti-hallucination** | Prompt système explicite : *« Tu ne disposes d'aucune mémoire externe »* + corpus injecté en `human_prompt`. |
+    | **Outils attachés** | Appels déterministes selon mots-clés de la query (`wants_reco`, `wants_survival`) + `calculate_movie_age` systématique si année dispo. |
+    | **Anti-collision tokens** | Le LLM ne voit que le contexte encyclopédique recompilé à blanc, pas les résumés techniques des autres nœuds. |
+    | **Sources propres** | Tableau `sources` structuré prêt pour l'API (`type`, `title`, `year`, `score`…). |
+
+2) Crée test_narration_node_iso.py à la racine :
+    ```
+    from src.graph.nodes import narration_node
+    from src.models.state import AgentState
+
+    def test_narration_plein():
+        state: AgentState = {
+            "query": "Parle-moi de The Exorcist et recommande-moi un film similaire",
+            "messages": [],
+            "rag_results": {
+                "faiss": {
+                    "best_score": 0.88,
+                    "hits": [
+                        {"text": "Regan est possédée par un démon via la ouija...", "score": 0.88, "source": "lore_exorcist.txt"},
+                    ],
+                },
+                "structured": {
+                    "movies": [
+                        {
+                            "id_film": 1,
+                            "title": "The Exorcist",
+                            "titre": "L'Exorciste",
+                            "year": 1973,
+                            "annee_sortie": 1973,
+                            "realisateur": "William Friedkin",
+                            "genres": "Horreur, Surnaturel",
+                        }
+                    ]
+                },
+            },
+            "scraped_data": None,
+            "needs_enrichment": None,
+            "final_answer": None,
+            "sources": None,
+            "metadata": {},
+        }
+        result = narration_node(state)
+        assert "final_answer" in result and len(result["final_answer"]) > 0
+        assert isinstance(result.get("sources"), list)
+        assert len(result["messages"]) == 1
+        print("✅ Test narration PLEIN passé")
+        print(f"📝 Réponse ({len(result['final_answer'])} car.) :\n{result['final_answer'][:400]}...")
+
+    def test_narration_vide():
+        state: AgentState = {
+            "query": "Film inexistant XYZ12345",
+            "messages": [],
+            "rag_results": {"faiss": {"best_score": 0.1, "hits": []}, "structured": {"movies": []}},
+            "scraped_data": None,
+            "needs_enrichment": None,
+            "final_answer": None,
+            "sources": None,
+            "metadata": {},
+        }
+        result = narration_node(state)
+        assert "final_answer" in result
+        print("✅ Test narration VIDE passé (ne plante pas)")
+
+    if __name__ == "__main__":
+        test_narration_plein()
+        print()
+        test_narration_vide()
+        print("\n✅ Tous les tests narration_node isolés passés.")
+    ```
+3) Vérifie qu'Ollama est démarré, puis : ` uv run python test_narration_node_iso.py `
+

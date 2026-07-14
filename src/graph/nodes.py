@@ -18,6 +18,10 @@ from src.tools.rag_tool import search_local_horror_lore
 from src.tools.rag_tool import query_movie_metadata  # outil structuré défini en Phase 1
 from src.tools.scraper_tool import enrich_from_web
 from langchain_core.messages import AIMessage
+from langchain_ollama import ChatOllama
+from langchain_core.messages import SystemMessage, HumanMessage
+from src.tools.horror_tools import calculate_movie_age, horror_survival_simulator
+from src.tools.rag_tool import find_similar_horror_movies
 
 
 def rag_node(state: AgentState) -> dict:
@@ -189,4 +193,203 @@ def scraper_node(state: AgentState) -> dict:
     return {
         "scraped_data": scraped_data,
         "messages": [AIMessage(content=summary)],
+    }
+    
+    
+_narrator_llm: ChatOllama | None = None
+
+# Instance LLM (singleton léger)
+def _get_narrator_llm() -> ChatOllama:
+    global _narrator_llm
+    if _narrator_llm is None:
+        _narrator_llm = ChatOllama(
+            model="qwen2.5:7b",
+            temperature=0.7,
+            # base_url="http://localhost:11434"  # décommente si Ollama n'est pas sur le port par défaut
+        )
+    return _narrator_llm
+
+
+def narration_node(state: AgentState) -> dict:
+    """
+    Node 3 : L'Écrivain Gothique (Peer-to-Peer).
+    
+    *Isolation stricte* : lit UNIQUEMENT :
+      - state["query"]    → question originale
+      - state["rag_results"]   → corpus structuré + vectoriel
+      - state["scraped_data"]  → enrichissement web éventuel
+    
+    NE LIT JAMAIS state["messages"] (anti-collision de tokens).
+    Produits : final_answer, sources, messages (AIMessage).
+    """
+    print(">>> Narration Node")
+
+    query: str = state.get("query", "")
+    rag = state.get("rag_results") or {}
+    scraped = state.get("scraped_data") or {}
+
+    # ── 1. CONSTRUCTION DU CORPUS (seules données autorisées) ──
+    context_blocks: list[str] = []
+
+    # 1a. Base structurée (SQL)
+    structured = rag.get("structured", {}) if isinstance(rag, dict) else {}
+    movies = structured.get("movies", []) if isinstance(structured, dict) else []
+    if movies:
+        context_blocks.append("=== FICHES CINÉMATOGRAPHQUES (Base structurée) ===")
+        for m in movies:
+            titre = m.get("title") or m.get("titre") or "Inconnu"
+            annee = m.get("year") or m.get("annee_sortie") or "?"
+            real = m.get("director") or m.get("realisateur") or "Non spécifié"
+            genres = m.get("genres") or "Non spécifié"
+            context_blocks.append(
+                f"Titre : {titre}\nAnnée : {annee}\nRéalisateur : {real}\nGenres : {genres}"
+            )
+
+    # 1b. Index vectoriel (FAISS)
+    faiss_data = rag.get("faiss", {}) if isinstance(rag, dict) else {}
+    hits = faiss_data.get("hits", []) if isinstance(faiss_data, dict) else []
+    if hits:
+        context_blocks.append("=== EXTRAITS DE LORE & CRITIQUES (Index vectoriel) ===")
+        for idx, hit in enumerate(hits[:3], 1):
+            text = hit.get("text") or hit.get("chunk") or ""
+            src = hit.get("source", "Inconnu")
+            score = hit.get("score", 0.0)
+            context_blocks.append(f"[{idx}] pertinence={score:.2f} | source={src}\n{text[:400]}")
+
+    # 1c. Enrichissement web (Scraper)
+    if isinstance(scraped, dict) and scraped.get("success"):
+        context_blocks.append("=== ENRICHISSEMENT WEB ===")
+        context_blocks.append(f"Titre analysé : {scraped.get('title', 'N/A')}")
+        content = scraped.get("content", "")
+        if content:
+            context_blocks.append(str(content)[:800])
+
+    encyclopedic_context = "\n\n".join(context_blocks) if context_blocks else (
+        "Aucune donnée encyclopédique n'a été récupérée pour cette requête."
+    )
+
+    # ── 2. APPELS DÉTERMINISTES DES OUTILS ANNEXES ──
+    tool_blocks: list[str] = []
+
+    # Outil : âge des films
+    if movies:
+        ages_lines = []
+        for m in movies:
+            yr = m.get("year") or m.get("annee_sortie")
+            if isinstance(yr, int):
+                try:
+                    age = calculate_movie_age(yr)
+                    titre = m.get("title") or m.get("titre") or "Film inconnu"
+                    ages_lines.append(f"- {titre} ({yr}) : {age} ans.")
+                except Exception:
+                    pass
+        if ages_lines:
+            tool_blocks.append("=== ÂGES DES FILMS ===")
+            tool_blocks.extend(ages_lines)
+
+    # Outil : recommandations par similarité (pgvector)
+    reco_kw = ["similaire", "recommand", "semblable", "dans le même genre", "comme", "ressemble", "approchant", "voisin"]
+    wants_reco = any(k in query.lower() for k in reco_kw)
+    if wants_reco and movies:
+        ref_id = movies[0].get("id") or movies[0].get("id_film")
+        if ref_id:
+            try:
+                voisins = find_similar_horror_movies(ref_id, k=3)
+                if voisins:
+                    tool_blocks.append("=== RECOMMANDATIONS PAR SIMILARITÉ ===")
+                    for v in voisins:
+                        tool_blocks.append(
+                            f"- {v.get('titre')} ({v.get('annee_sortie')}) — proximité={v.get('similarite', 'N/A')}"
+                        )
+            except Exception as exc:
+                print(f"[Narration] Outil similarité indisponible : {exc}")
+
+    # Outil : simulateur de survie horreur
+    survival_kw = ["survivre", "survie", "survival", "tuerie", "slash", "massacre", "fuir", "plan de fuite"]
+    wants_survival = any(k in query.lower() for k in survival_kw)
+    if wants_survival:
+        try:
+            # Adapte la signature si horror_survival_simulator n'a pas exactement ces args
+            titre_cible = movies[0].get("title") or movies[0].get("titre") or query if movies else query
+            result_surv = horror_survival_simulator(titre_cible, user_role="spectateur")
+            tool_blocks.append("=== SIMULATEUR DE SURVIE ===")
+            tool_blocks.append(str(result_surv))
+        except Exception as exc:
+            print(f"[Narration] Outil survie indisponible : {exc}")
+
+    tool_context = "\n".join(tool_blocks) if tool_blocks else ""
+
+    # ── 3. PROMPT SYSTÈME ULTRA-SPÉCIALISÉ (anti-hallucination) ──
+    system_prompt = (
+        "Tu es HorRAGor, chroniqueur de cinéma d'horreur gothique, vêtu d'une redingote noire "
+        "et armé d'une plume d'argent. Tu ne disposes d'aucune mémoire externe. "
+        "Tu dois te baser UNIQUEMENT sur les données encyclopédiques et les outils fournis ci-dessous. "
+        "Règles absolues :\n"
+        "1. Base-toi exclusivement sur les sections FICHES, EXTRAITS, ENRICHISSEMENT et Outils.\n"
+        "2. Si la réponse n'est pas dans le corpus, avoue-le avec élégance gothique ; n'invente jamais.\n"
+        "3. Ne invente aucun titre, réalisateur, date, ou intrigue.\n"
+        "4. Sépare clairement chaque film si le corpus en mentione plusieurs.\n"
+        "5. Utilise les RECOMMANDATIONS uniquement si elles sont fournies par l'outil.\n"
+        "6. Termine toujours par une signature macabre appropriée."
+    )
+
+    human_parts = [
+        f"QUESTION DU LECTEUR : {query}",
+        "",
+        "--- ENCYCLOPÉDIE HORRAGOR ---",
+        encyclopedic_context,
+    ]
+    if tool_context:
+        human_parts.extend(["", "--- DONNÉES D'OUTILS ---", tool_context])
+    human_parts.extend([
+        "",
+        "--- RÉPONSE ATTENDUE ---",
+        "Rédige une chronique immersive, structurée et strictement fondée sur le corpus ci-dessus.",
+    ])
+    human_prompt = "\n".join(human_parts)
+
+    # ── 4. INVOCATION LLM (seul coût cognitif du pipeline) ──
+    try:
+        llm = _get_narrator_llm()
+        response = llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt)
+        ])
+        final_answer = str(response.content)
+    except Exception as exc:
+        print(f"[Narration] Échec invocation LLM : {exc}")
+        final_answer = (
+            "Les archives gothiques se taisent... Le démon Ollama semble endormi. "
+            "Revenez quand les lanternes seront de nouveau allumées."
+        )
+
+    # ── 5. SOURCES STRUCTURÉES (pour l'API front) ──
+    sources = []
+    for m in movies:
+        sources.append({
+            "type": "structured",
+            "title": m.get("title") or m.get("titre"),
+            "year": m.get("year") or m.get("annee_sortie"),
+            "source": "supabase_sql",
+        })
+    for h in hits[:3]:
+        sources.append({
+            "type": "faiss",
+            "score": h.get("score"),
+            "source_file": h.get("source", "horror_lore"),
+            "preview": (h.get("text") or h.get("chunk") or "")[:120] + "...",
+        })
+    if isinstance(scraped, dict) and scraped.get("success"):
+        sources.append({
+            "type": "scraped",
+            "title": scraped.get("title"),
+            "source": "wikipedia",
+        })
+
+    # ── 6. RETOUR ──
+    summary = f"🖋️ Narration générée ({len(final_answer)} caractères) — {len(sources)} source(s)."
+    return {
+        "final_answer": final_answer,
+        "sources": sources,
+        "messages": [AIMessage(content=summary + "\n\n" + final_answer)],
     }
