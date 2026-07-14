@@ -162,7 +162,12 @@ Décide aussi où vivent les **sources** que l'API devra retourner (`ChatRespons
 
 ### 2.2 Configurer la persistance (Checkpoint) ###
 
-Utilise `MemorySaver` de LangGraph pour la persistance en mémoire du MVP. Cela permet à chaque thread/conversation de conserver son contexte. La migration vers un checkpointer persistant (SQLite/Postgres) n'est nécessaire qu'à partir du Bloc Industrialisation (Phase 7) — inutile de t'en soucier maintenant.
+Pour le MVP, la persistance en mémoire est assurée par le MemorySaver de LangGraph.Pas de fichier dédié (checkpointer.py) : l'instanciation et le branchement du MemorySaver se feront directement lors de la compilation du graphe dans pipeline.py (Phase 3 — voir src/graph/pipeline.py).
+
+- Action : reporter la configuration du MemorySaver à l'étape d'assemblage final
+- Raison : L'arborescence du projet ne prévoit pas de module intermédiaire pour le checkpointer. Garder cette configuration dans pipeline.py centralise le câblage technique au même endroit que le câblage des nœuds.
+
+Note pour la Phase 7 (Industrialisation) : La migration vers un checkpointer persistant (SQLite/PostgreSQL) remplacera alors le MemorySaver dans pipeline.py, sans impacter les autres fichiers.
 
 ---
 
