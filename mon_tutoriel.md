@@ -604,3 +604,97 @@ C'est un noeud déterministe (=> pas d appel a un llm)
 
 **=> Creation de "src/graph/nodes.py" :**  
 Pour l'instant, ce fichier ne contient que le chercheur local. Les deux autres ouvriers (scraper_node, narration_node) viendront s'y greffer dans les étapes suivantes.
+
+## 3.2 Le Router (router.py) ##
+le router est une fonction Python pure, zéro LLM, qui lit state["rag_results"] et renvoie une chaîne "narration" ou "scraper".
+
+Le contrat de données entre rag_node et router  :  
+Pour que le router puisse décider sans ambiguïté, le rag_node doit écrire dans l'état un dict structuré de cette forme :
+```
+state["rag_results"] = {
+    "faiss": {
+        "hits": [
+            {"text": "...", "score": 0.78, "source": "lore_1973.txt"},
+            {"text": "...", "score": 0.61, "source": "lore_1973.txt"},
+        ],
+        "best_score": 0.78,   # cosine similarity (IndexFlatIP, vecteurs normalisés)
+        "count": 2,
+    },
+    "structured": {
+        "movies": [
+            {"id": 123, "title": "The Exorcist", "year": 1973, ...}
+        ],
+        "count": 1,
+    }
+}
+```
+
+1) creation du fichier "src/graph/router.py"
+2) creation d un test "test_router_iso.py"
+```
+# test_router_iso.py  ← fichier jetable après validation
+"""Tests isolés du router — à supprimer ou déplacer dans tests/ après succès.
+
+Usage :
+    python test_router_iso.py
+
+Puis suppression :
+    rm test_router_iso.py
+"""
+
+from src.graph.router import route_after_rag
+
+
+def test_riche__narration():
+    state = {
+        "rag_results": {
+            "faiss": {
+                "hits": [
+                    {"text": "The Exorcist 1973...", "score": 0.81},
+                    {"text": "Regan MacNeil...", "score": 0.74},
+                ],
+                "best_score": 0.81,
+            },
+            "structured": {
+                "movies": [{"id": 1, "title": "The Exorcist", "year": 1973}]
+            },
+        }
+    }
+    assert route_after_rag(state) == "narration", "riche devrait aller en narration"
+
+
+def test_struct_vide__scraper_meme_si_faiss_renvoie_qqch():
+    state = {
+        "rag_results": {
+            "faiss": {
+                "hits": [{"text": "...", "score": 0.55}],
+                "best_score": 0.55,
+            },
+            "structured": {"movies": []},
+        }
+    }
+    assert route_after_rag(state) == "scraper", "struct vide doit basculer scraper"
+
+
+def test_faiss_faible__scraper():
+    state = {
+        "rag_results": {
+            "faiss": {"hits": [{"score": 0.42}], "best_score": 0.42},
+            "structured": {"movies": [{"id": 2, "title": "Some Film"}]},
+        }
+    }
+    assert route_after_rag(state) == "scraper", "faiss faible doit basculer scraper"
+
+
+def test_rag_results_manquant__scraper():
+    assert route_after_rag({}) == "scraper", "garde-fou manquant doit basculer scraper"
+
+
+if __name__ == "__main__":
+    test_riche__narration()
+    test_struct_vide__scraper_meme_si_faiss_renvoie_qqch()
+    test_faiss_faible__scraper()
+    test_rag_results_manquant__scraper()
+    print("✅ 4/4 tests router isolés passés — le router est calibré.")
+```
+3) commande pour executer le test ` uv run python test_router_iso.py `
