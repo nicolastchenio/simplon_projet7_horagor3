@@ -533,7 +533,7 @@ Pour executer le test =>  ` uv run python test_scraper.py `
 
 ## 2.1 Définir le schéma State ##
 
-=> creation du fichier "src\models\state.py"
+**=> creation du fichier "src\models\state.py"**
 
 Le cœur du système : AgentState, la mémoire commune que tous tes agents (RAG, Scraper, Narration) vont lire et modifier à chaque étape du graphe.
 
@@ -581,3 +581,339 @@ Avec operator.add, LangGraph concatène :
 Résultat : [human_msg, ai_msg, human_msg, ai_msg, rag_msg] → tout est dupliqué !
 Avec add_messages, le reducer regarde les IDs uniques des messages : il sait que human_msg et ai_msg existent déjà, il ne les recopie pas.
 
+# Phase 3 : Construction du Graphe Multi-Agent (Peer-to-Peer) #
+
+## 3.1 Node 1 : L'Agent RAG (rag_node) ##
+
+C'est un noeud déterministe (=> pas d appel a un llm)
+1) Le contrat d'un nœud LangGraph :  
+    Dans LangGraph, un nœud n'est pas une classe. C'est une fonction Python pure qui respecte un contrat strict :
+    - Entrée : elle reçoit l'état courant (state: AgentState) — c'est un snapshot complet de la mémoire commune.
+    - Sortie : elle retourne un dict contenant uniquement les clés qu'elle veut ajouter ou modifier.
+    - Fusion : LangGraph applique ce dict sur l'état global. Pour la liste messages, grâce au reducer add_messages que tu as déclaré dans AgentState, le nouveau message est ajouté (pas écrasé).
+
+
+    Règle d'or : on ne jamaise balance la donnée brute (JSON kilométrique) dans messages. On y met un résumé synthétique (AIMessage). La donnée brute reste dans rag_results, accessible aux nœuds suivants par clé
+
+2) La stratégie du double appel (Vectoriel + Structuré) :  
+    Le rag_node doit être le seul endroit où l'on interroge le savoir local. Il croise :  
+    - search_local_horror_lore(query) → le cœur vectoriel FAISS (chunks de lore, synopsis, critiques).
+    - query_movie_metadata(query) → la base structurée (SQL ou dictionnaire de métadonnées : titre, réalisateur, année, etc.).
+
+    Si l'utilisateur demande "Qui a réalisé L'Exorciste en 1973 ?", FAISS peut rapporter des chunks pertinents mais oublier l'année exacte. La requête structurée elle, remonte la fiche complète. Le routeur (3.2) décidera ensuite si ce double résultat est suffisant.
+
+**=> Creation de "src/graph/nodes.py" :**  
+Pour l'instant, ce fichier ne contient que le chercheur local. Les deux autres ouvriers (scraper_node, narration_node) viendront s'y greffer dans les étapes suivantes.
+
+## 3.2 Le Router (router.py) ##
+le router est une fonction Python pure, zéro LLM, qui lit state["rag_results"] et renvoie une chaîne "narration" ou "scraper".
+
+Le contrat de données entre rag_node et router  :  
+Pour que le router puisse décider sans ambiguïté, le rag_node doit écrire dans l'état un dict structuré de cette forme :
+```
+state["rag_results"] = {
+    "faiss": {
+        "hits": [
+            {"text": "...", "score": 0.78, "source": "lore_1973.txt"},
+            {"text": "...", "score": 0.61, "source": "lore_1973.txt"},
+        ],
+        "best_score": 0.78,   # cosine similarity (IndexFlatIP, vecteurs normalisés)
+        "count": 2,
+    },
+    "structured": {
+        "movies": [
+            {"id": 123, "title": "The Exorcist", "year": 1973, ...}
+        ],
+        "count": 1,
+    }
+}
+```
+
+1) creation du fichier "src/graph/router.py"
+2) creation d un test "test_router_iso.py"
+```
+# test_router_iso.py  ← fichier jetable après validation
+"""Tests isolés du router — à supprimer ou déplacer dans tests/ après succès.
+
+Usage :
+    python test_router_iso.py
+
+Puis suppression :
+    rm test_router_iso.py
+"""
+
+from src.graph.router import route_after_rag
+
+
+def test_riche__narration():
+    state = {
+        "rag_results": {
+            "faiss": {
+                "hits": [
+                    {"text": "The Exorcist 1973...", "score": 0.81},
+                    {"text": "Regan MacNeil...", "score": 0.74},
+                ],
+                "best_score": 0.81,
+            },
+            "structured": {
+                "movies": [{"id": 1, "title": "The Exorcist", "year": 1973}]
+            },
+        }
+    }
+    assert route_after_rag(state) == "narration", "riche devrait aller en narration"
+
+
+def test_struct_vide__scraper_meme_si_faiss_renvoie_qqch():
+    state = {
+        "rag_results": {
+            "faiss": {
+                "hits": [{"text": "...", "score": 0.55}],
+                "best_score": 0.55,
+            },
+            "structured": {"movies": []},
+        }
+    }
+    assert route_after_rag(state) == "scraper", "struct vide doit basculer scraper"
+
+
+def test_faiss_faible__scraper():
+    state = {
+        "rag_results": {
+            "faiss": {"hits": [{"score": 0.42}], "best_score": 0.42},
+            "structured": {"movies": [{"id": 2, "title": "Some Film"}]},
+        }
+    }
+    assert route_after_rag(state) == "scraper", "faiss faible doit basculer scraper"
+
+
+def test_rag_results_manquant__scraper():
+    assert route_after_rag({}) == "scraper", "garde-fou manquant doit basculer scraper"
+
+
+if __name__ == "__main__":
+    test_riche__narration()
+    test_struct_vide__scraper_meme_si_faiss_renvoie_qqch()
+    test_faiss_faible__scraper()
+    test_rag_results_manquant__scraper()
+    print("✅ 4/4 tests router isolés passés — le router est calibré.")
+```
+3) commande pour executer le test ` uv run python test_router_iso.py `
+
+## 3.3 Node 2 : L'Agent Scraper (scraper_node) ##
+1) Dans "src/graph/nodes.py" — ajouter scraper_node
+2) Crée test_scraper_node_iso.py à la racine :
+```
+from src.graph.nodes import scraper_node
+from src.models.state import AgentState
+
+def test_scraper_avec_titre_structuré():
+    state: AgentState = {
+        "query": "film avec le clown des égouts",
+        "messages": [],
+        "rag_results": {
+            "faiss": {"best_score": 0.38, "hits": []},
+            "structured": {"movies": [{"id": 42, "title": "It"}]},
+        },
+        "scraped_data": None,
+        "needs_enrichment": None,
+        "final_answer": None,
+        "sources": None,
+        "metadata": {},
+    }
+    result = scraper_node(state)
+    assert "scraped_data" in result
+    assert result["scraped_data"]["title"] == "It"
+    assert result["scraped_data"]["success"] in (True, False)
+    print("✅ Test structuré OK")
+
+def test_scraper_fallback_query():
+    state: AgentState = {
+        "query": "The Exorcist",
+        "messages": [],
+        "rag_results": {"faiss": {"best_score": 0.2, "hits": []}, "structured": {"movies": []}},
+        "scraped_data": None,
+        "needs_enrichment": None,
+        "final_answer": None,
+        "sources": None,
+        "metadata": {},
+    }
+    result = scraper_node(state)
+    assert result["scraped_data"]["title"] == "The Exorcist"
+    print("✅ Test fallback query OK")
+
+if __name__ == "__main__":
+    test_scraper_avec_titre_structuré()
+    test_scraper_fallback_query()
+    print("✅ Tests scraper_node isolés passés")
+```
+
+3) executer la command ` uv run python test_scraper_node_iso.py `
+
+## 3.4 Node 3 : L'Agent Narration (narration_node) ##
+1) Dans "src/graph/nodes.py" — ajouter narration_node
+
+    | Principe plan | Réalisation dans le code |
+    |---|---|
+    | **Isolation stricte** | On lit `query`, `rag_results`, `scraped_data`. On ne parcourt **jamais** `state["messages"]`. |
+    | **Anti-hallucination** | Prompt système explicite : *« Tu ne disposes d'aucune mémoire externe »* + corpus injecté en `human_prompt`. |
+    | **Outils attachés** | Appels déterministes selon mots-clés de la query (`wants_reco`, `wants_survival`) + `calculate_movie_age` systématique si année dispo. |
+    | **Anti-collision tokens** | Le LLM ne voit que le contexte encyclopédique recompilé à blanc, pas les résumés techniques des autres nœuds. |
+    | **Sources propres** | Tableau `sources` structuré prêt pour l'API (`type`, `title`, `year`, `score`…). |
+
+2) Crée test_narration_node_iso.py à la racine :
+    ```
+    from src.graph.nodes import narration_node
+    from src.models.state import AgentState
+
+    def test_narration_plein():
+        state: AgentState = {
+            "query": "Parle-moi de The Exorcist et recommande-moi un film similaire",
+            "messages": [],
+            "rag_results": {
+                "faiss": {
+                    "best_score": 0.88,
+                    "hits": [
+                        {"text": "Regan est possédée par un démon via la ouija...", "score": 0.88, "source": "lore_exorcist.txt"},
+                    ],
+                },
+                "structured": {
+                    "movies": [
+                        {
+                            "id_film": 1,
+                            "title": "The Exorcist",
+                            "titre": "L'Exorciste",
+                            "year": 1973,
+                            "annee_sortie": 1973,
+                            "realisateur": "William Friedkin",
+                            "genres": "Horreur, Surnaturel",
+                        }
+                    ]
+                },
+            },
+            "scraped_data": None,
+            "needs_enrichment": None,
+            "final_answer": None,
+            "sources": None,
+            "metadata": {},
+        }
+        result = narration_node(state)
+        assert "final_answer" in result and len(result["final_answer"]) > 0
+        assert isinstance(result.get("sources"), list)
+        assert len(result["messages"]) == 1
+        print("✅ Test narration PLEIN passé")
+        print(f"📝 Réponse ({len(result['final_answer'])} car.) :\n{result['final_answer'][:400]}...")
+
+    def test_narration_vide():
+        state: AgentState = {
+            "query": "Film inexistant XYZ12345",
+            "messages": [],
+            "rag_results": {"faiss": {"best_score": 0.1, "hits": []}, "structured": {"movies": []}},
+            "scraped_data": None,
+            "needs_enrichment": None,
+            "final_answer": None,
+            "sources": None,
+            "metadata": {},
+        }
+        result = narration_node(state)
+        assert "final_answer" in result
+        print("✅ Test narration VIDE passé (ne plante pas)")
+
+    if __name__ == "__main__":
+        test_narration_plein()
+        print()
+        test_narration_vide()
+        print("\n✅ Tous les tests narration_node isolés passés.")
+    ```
+3) Vérifie qu'Ollama est démarré, puis : ` uv run python test_narration_node_iso.py `
+
+## 3.5 Câblage et Compilation (pipeline.py) ##
+
+1) creation du fichier "src/graph/pipeline.py"
+    | Élément | Rôle |
+    |---|---|
+    | `MemorySaver()` | Checkpointer in-memory qui permet de reprendre une conversation (thread_id) si tu veux ajouter du chat multi-tours plus tard. |
+    | `workflow.compile(checkpointer=memory)` | Figé le graphe en une application exécutable. |
+    | `add_conditional_edges` | Aiguillage déterministe Python (ton `route_after_rag`) — **zéro appel LLM** pour router. |
+    | `config={"configurable": {"thread_id": ...}}` | Obligatoire dès qu'on utilise un checkpointer, même en mode stateless par requête. |
+
+
+
+2) Crée à la racine test_pipeline.py pour valider le flux complet :
+   ```
+   """
+    test_pipeline.py (jetable)
+    Validation end-to-end : RAG → Router → Narration (ou Scraper) → Narration.
+    """
+    import uuid
+
+    from src.graph.pipeline import build_horragor_graph
+    from src.models.state import AgentState
+
+
+    def run_graph(query: str):
+        graph = build_horragor_graph()
+
+        initial_state: AgentState = {
+            "query": query,
+            "messages": [],
+            "rag_results": None,
+            "scraped_data": None,
+            "needs_enrichment": None,
+            "final_answer": None,
+            "sources": None,
+            "metadata": {"session_id": str(uuid.uuid4())},
+        }
+
+        # Configuration du thread pour le checkpointer
+        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+
+        final_state = graph.invoke(initial_state, config=config)
+        return final_state
+
+
+    def test_chemin_direct_narration():
+        """Question riche → devrait passer directement à narration_node."""
+        print("\n=== TEST : Chemin RAG → Narration ===")
+        result = run_graph("Parle-moi de The Exorcist et de son impact")
+
+        answer = result.get("final_answer", "")
+        sources = result.get("sources", [])
+
+        print(f"Réponse ({len(answer)} car.) :")
+        print(answer[:600] + ("..." if len(answer) > 600 else ""))
+        print(f"\nSources utilisées : {len(sources)}")
+        for s in sources:
+            print("  -", s)
+
+        assert answer, "final_answer ne doit pas être vide"
+        assert result["messages"], "L'historique doit contenir le message final"
+        print("\n✅ Chemin direct passé.")
+
+
+    def test_chemin_avec_scraper():
+        """Question ambiguë ou film incomplet → devrait transiter par scraper_node."""
+        print("\n=== TEST : Chemin RAG → Scraper → Narration ===")
+        result = run_graph("Le film avec un clown qui tue des gosses dans les égouts")
+
+        answer = result.get("final_answer", "")
+        scraped = result.get("scraped_data")
+
+        print(f"Réponse ({len(answer)} car.) :")
+        print(answer[:600] + ("..." if len(answer) > 600 else ""))
+        if scraped:
+            print(f"\nDonnées scrapées présentes : {len(scraped.get('movies', []))} film(s)")
+        else:
+            print("\n(Aucun scraping déclenché — le RAG a peut-être suffi)")
+
+        assert answer, "final_answer ne doit pas être vide"
+        print("\n✅ Chemin via scraper passé (ou RAG autosuffisant).")
+
+
+    if __name__ == "__main__":
+        test_chemin_direct_narration()
+        test_chemin_avec_scraper()
+        print("\n" + "=" * 50)
+        print("✅ Tous les tests pipeline passés.")
+        print("=" * 50)
+    ```
+3) Lance le test (Ollama doit tourner) : ` uv run python test_pipeline.py `
