@@ -525,6 +525,59 @@ Parser une page Wikipédia complète en HTML est très fragile : la structure in
         print("=== Test 3 : film inexistant ===\n")
         print(repr(enrich_from_web("FilmInexistantXYZ123")))
 
-```
+    ```
 
 Pour executer le test =>  ` uv run python test_scraper.py `
+
+# Phase 2 : Le State et la Mémoire Commune #
+
+## 2.1 Définir le schéma State ##
+
+=> creation du fichier "src\models\state.py"
+
+Le cœur du système : AgentState, la mémoire commune que tous tes agents (RAG, Scraper, Narration) vont lire et modifier à chaque étape du graphe.
+
+LangGraph est optimisé pour TypedDict car il fonctionne parfaitement avec le système de reducers (voir ci-dessous) et vérifie les types sans imposer la validation lourde de Pydantic à chaque transition. C’est plus léger et c’est le standard de la doc officielle.
+
+Reducer : Annotated[list[BaseMessage], add_messages].  
+add_messages (fourni par LangGraph) fusionne automatiquement les nouveaux messages avec l’historique déjà présent.
+
+On crée un champ dédié sources dans AgentState, rempli par le narration_node à la fin.
+- Cela évite à l’API FastAPI de deviner ou parser metadata pour reconstruire la réponse.
+- Le contrat entre le graphe et l’API reste propre et explicite : le graphe sort un final_answer + un tableau sources prêt à être sérialisé en ChatResponse.sources.
+
+| Champ | Qui l'écrit ? | Qui le lit ? |
+|---|---|---|
+| `messages` | Tous les nœuds (via reducer) | Tous les nœuds + API |
+| `query` | API (entrée) | `rag_node`, `router` |
+| `rag_results` | `rag_node` | `router`, `narration_node` |
+| `scraped_data` | `scraper_node` | `narration_node` |
+| `needs_enrichment` | `router` | Debug, tests, logs |
+| `final_answer` | `narration_node` | API (réponse utilisateur) |
+| `sources` | `narration_node` | API (`ChatResponse`) |
+| `metadata` | Tous les nœuds | API, Langfuse, tests |
+
+Note Personnel :
+
+Différence entre Sequence vs list
+C'est cosmétique. Sequence[BaseMessage] dit « quelque chose qui se comporte comme une liste » (tuple, liste...). list[BaseMessage] est plus explicite. Les deux passent, mais list est plus moderne en Python 3.10+
+
+Différence entre operator.add vs add_messages
+| | `operator.add` | `add_messages` |
+|---|---|---|
+| **Ce que ça fait** | Concatène deux listes : `[a] + [b]` | Concatène **en dédupliquant par ID** |
+| **Le piège** | Si un nœud renvoie `state["messages"]` au lieu des *nouveaux* messages, l'historique entier est dupliqué | Détecte les messages déjà présents et les ignore |
+
+Imaginons que rag_node renvoie malencontreusement l'historique complet :
+```
+# Dans rag_node — BUG classique du débutant
+return {"messages": state["messages"] + [new_msg]}
+Avec operator.add, LangGraph concatène :
+```
+
+- Ancienne liste : [human_msg, ai_msg] (déjà dans le state)
+- Nouvelle liste : [human_msg, ai_msg, rag_msg] (renvoyée par le nœud)
+
+Résultat : [human_msg, ai_msg, human_msg, ai_msg, rag_msg] → tout est dupliqué !
+Avec add_messages, le reducer regarde les IDs uniques des messages : il sait que human_msg et ai_msg existent déjà, il ne les recopie pas.
+
