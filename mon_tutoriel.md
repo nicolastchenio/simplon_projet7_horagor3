@@ -533,7 +533,7 @@ Pour executer le test =>  ` uv run python test_scraper.py `
 
 ## 2.1 Définir le schéma State ##
 
-=> creation du fichier "src\models\state.py"
+**=> creation du fichier "src\models\state.py"**
 
 Le cœur du système : AgentState, la mémoire commune que tous tes agents (RAG, Scraper, Narration) vont lire et modifier à chaque étape du graphe.
 
@@ -581,3 +581,26 @@ Avec operator.add, LangGraph concatène :
 Résultat : [human_msg, ai_msg, human_msg, ai_msg, rag_msg] → tout est dupliqué !
 Avec add_messages, le reducer regarde les IDs uniques des messages : il sait que human_msg et ai_msg existent déjà, il ne les recopie pas.
 
+# Phase 3 : Construction du Graphe Multi-Agent (Peer-to-Peer) #
+
+## 3.1 Node 1 : L'Agent RAG (rag_node) ##
+
+C'est un noeud déterministe (=> pas d appel a un llm)
+1) Le contrat d'un nœud LangGraph :  
+    Dans LangGraph, un nœud n'est pas une classe. C'est une fonction Python pure qui respecte un contrat strict :
+    - Entrée : elle reçoit l'état courant (state: AgentState) — c'est un snapshot complet de la mémoire commune.
+    - Sortie : elle retourne un dict contenant uniquement les clés qu'elle veut ajouter ou modifier.
+    - Fusion : LangGraph applique ce dict sur l'état global. Pour la liste messages, grâce au reducer add_messages que tu as déclaré dans AgentState, le nouveau message est ajouté (pas écrasé).
+
+
+    Règle d'or : on ne jamaise balance la donnée brute (JSON kilométrique) dans messages. On y met un résumé synthétique (AIMessage). La donnée brute reste dans rag_results, accessible aux nœuds suivants par clé
+
+2) La stratégie du double appel (Vectoriel + Structuré) :  
+    Le rag_node doit être le seul endroit où l'on interroge le savoir local. Il croise :  
+    - search_local_horror_lore(query) → le cœur vectoriel FAISS (chunks de lore, synopsis, critiques).
+    - query_movie_metadata(query) → la base structurée (SQL ou dictionnaire de métadonnées : titre, réalisateur, année, etc.).
+
+    Si l'utilisateur demande "Qui a réalisé L'Exorciste en 1973 ?", FAISS peut rapporter des chunks pertinents mais oublier l'année exacte. La requête structurée elle, remonte la fiche complète. Le routeur (3.2) décidera ensuite si ce double résultat est suffisant.
+
+**=> Creation de "src/graph/nodes.py" :**  
+Pour l'instant, ce fichier ne contient que le chercheur local. Les deux autres ouvriers (scraper_node, narration_node) viendront s'y greffer dans les étapes suivantes.
