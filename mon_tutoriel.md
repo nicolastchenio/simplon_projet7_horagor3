@@ -826,3 +826,94 @@ if __name__ == "__main__":
     ```
 3) Vérifie qu'Ollama est démarré, puis : ` uv run python test_narration_node_iso.py `
 
+## 3.5 Câblage et Compilation (pipeline.py) ##
+
+1) creation du fichier "src/graph/pipeline.py"
+    | Élément | Rôle |
+    |---|---|
+    | `MemorySaver()` | Checkpointer in-memory qui permet de reprendre une conversation (thread_id) si tu veux ajouter du chat multi-tours plus tard. |
+    | `workflow.compile(checkpointer=memory)` | Figé le graphe en une application exécutable. |
+    | `add_conditional_edges` | Aiguillage déterministe Python (ton `route_after_rag`) — **zéro appel LLM** pour router. |
+    | `config={"configurable": {"thread_id": ...}}` | Obligatoire dès qu'on utilise un checkpointer, même en mode stateless par requête. |
+
+
+
+2) Crée à la racine test_pipeline.py pour valider le flux complet :
+   ```
+   """
+    test_pipeline.py (jetable)
+    Validation end-to-end : RAG → Router → Narration (ou Scraper) → Narration.
+    """
+    import uuid
+
+    from src.graph.pipeline import build_horragor_graph
+    from src.models.state import AgentState
+
+
+    def run_graph(query: str):
+        graph = build_horragor_graph()
+
+        initial_state: AgentState = {
+            "query": query,
+            "messages": [],
+            "rag_results": None,
+            "scraped_data": None,
+            "needs_enrichment": None,
+            "final_answer": None,
+            "sources": None,
+            "metadata": {"session_id": str(uuid.uuid4())},
+        }
+
+        # Configuration du thread pour le checkpointer
+        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+
+        final_state = graph.invoke(initial_state, config=config)
+        return final_state
+
+
+    def test_chemin_direct_narration():
+        """Question riche → devrait passer directement à narration_node."""
+        print("\n=== TEST : Chemin RAG → Narration ===")
+        result = run_graph("Parle-moi de The Exorcist et de son impact")
+
+        answer = result.get("final_answer", "")
+        sources = result.get("sources", [])
+
+        print(f"Réponse ({len(answer)} car.) :")
+        print(answer[:600] + ("..." if len(answer) > 600 else ""))
+        print(f"\nSources utilisées : {len(sources)}")
+        for s in sources:
+            print("  -", s)
+
+        assert answer, "final_answer ne doit pas être vide"
+        assert result["messages"], "L'historique doit contenir le message final"
+        print("\n✅ Chemin direct passé.")
+
+
+    def test_chemin_avec_scraper():
+        """Question ambiguë ou film incomplet → devrait transiter par scraper_node."""
+        print("\n=== TEST : Chemin RAG → Scraper → Narration ===")
+        result = run_graph("Le film avec un clown qui tue des gosses dans les égouts")
+
+        answer = result.get("final_answer", "")
+        scraped = result.get("scraped_data")
+
+        print(f"Réponse ({len(answer)} car.) :")
+        print(answer[:600] + ("..." if len(answer) > 600 else ""))
+        if scraped:
+            print(f"\nDonnées scrapées présentes : {len(scraped.get('movies', []))} film(s)")
+        else:
+            print("\n(Aucun scraping déclenché — le RAG a peut-être suffi)")
+
+        assert answer, "final_answer ne doit pas être vide"
+        print("\n✅ Chemin via scraper passé (ou RAG autosuffisant).")
+
+
+    if __name__ == "__main__":
+        test_chemin_direct_narration()
+        test_chemin_avec_scraper()
+        print("\n" + "=" * 50)
+        print("✅ Tous les tests pipeline passés.")
+        print("=" * 50)
+    ```
+3) Lance le test (Ollama doit tourner) : ` uv run python test_pipeline.py `

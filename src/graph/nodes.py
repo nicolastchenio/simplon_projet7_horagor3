@@ -11,6 +11,7 @@ que le moteur fusionnera dans l'``AgentState`` global.
     étapes 3.3 et 3.4.
 """
 
+import re
 from langchain_core.messages import AIMessage
 
 from src.models.state import AgentState
@@ -41,7 +42,7 @@ def rag_node(state: AgentState) -> dict:
         clé ``query`` avec la question de l'utilisateur.
     :returns: Dictionnaire de patch LangGraph contenant :
 
-        - ``rag_results`` : conteneur hybride ``{"vectorial": ..., "structured": ...}`` ;
+        - ``rag_results`` : conteneur hybride ``{"faiss": {"hits": [...], "best_score": float}, "structured": {"movies": [...]}}`` ;
         - ``metadata`` : métriques de traçabilité (compteurs, titres trouvés) ;
         - ``messages`` : résumé de la fouille sous forme d'``AIMessage``.
 
@@ -70,41 +71,107 @@ def rag_node(state: AgentState) -> dict:
     vectorial_results = search_local_horror_lore(user_query)
     structured_results = query_movie_metadata(user_query)
 
+        # ------------------------------------------------------------------
+    # 3. Normalisation au contrat attendu par le router et la narration
     # ------------------------------------------------------------------
-    # 3. Assemblage du conteneur rag_results
-    # ------------------------------------------------------------------
-    # Ce format est attendu par le routeur (étape 3.2) et par le nœud
-    # de narration (étape 3.4). Le routeur s'appuiera sur la richesse
-    # de ces deux clés pour décider du basculement vers le scraper.
+    # Le routeur (route_after_rag) et le narrateur partagent le même
+    # schéma de données. Le routeur s'appuie sur :
+    #   - rag_results["faiss"]["hits"]        -> liste de dicts avec "score"
+    #   - rag_results["faiss"]["best_score"]  -> float (cosine similarity)
+    #   - rag_results["structured"]["movies"] -> liste de fiches films
+    # Le narrateur lit ces mêmes clés pour construire le corpus.
+
+    # --- Normalisation FAISS (anciennement "vectorial") ---
+    faiss_hits: list[dict] = []
+    best_faiss_score: float = 0.0
+
+    if isinstance(vectorial_results, dict):
+        # L'outil search_local_horror_lore retourne souvent {"results": [...]}
+        raw_hits = vectorial_results.get("results", [])
+    elif isinstance(vectorial_results, list):
+        raw_hits = vectorial_results
+    else:
+        raw_hits = []
+
+    for idx, hit in enumerate(raw_hits):
+        if not isinstance(hit, dict):
+            continue
+        # Tolérance sur les noms de clé de score selon la version de l'outil
+        score = float(
+            hit.get("score", hit.get("similarity", hit.get("distance", 0.0)))
+        )
+        faiss_hits.append(
+            {
+                "score": score,
+                "text": hit.get("text", hit.get("chunk", "")),
+                "source": hit.get("source", f"faiss_hit_{idx}"),
+            }
+        )
+        if score > best_faiss_score:
+            best_faiss_score = score
+
+    # --- Normalisation Structurée (SQL / métadonnées) ---
+    structured_movies: list[dict] = []
+    if isinstance(structured_results, dict):
+        structured_movies = (
+            structured_results.get("movies")
+            or structured_results.get("results")
+            or []
+        )
+    elif isinstance(structured_results, list):
+        structured_movies = structured_results
+
+    # --- Fallback structuré par rétro-action FAISS ---
+    # Quand la requête en langage naturel est trop verbeuse,
+    # query_movie_metadata peut échouer à trouver la fiche.
+    # On utilise les titres extraits des chunks FAISS pour relancer
+    # une recherche ciblée en base structurée avant de déclarer l'échec.
+    # if not structured_movies and faiss_hits:
+    #     for hit in faiss_hits[:2]:
+    #         text = hit.get("text", "")
+    #         m = re.search(r"(?i)Titre\s*:\s*([^\n\r|]+)", text)
+    #         if m:
+    #             titre_candidat = m.group(1).strip()
+    #             print(f"[RAG Node] Fallback SQL sur titre FAISS : {titre_candidat}")
+    #             fallback_result = query_movie_metadata(titre_candidat)
+    #             if isinstance(fallback_result, dict):
+    #                 candidates = (
+    #                     fallback_result.get("movies")
+    #                     or fallback_result.get("results")
+    #                     or []
+    #                 )
+    #             elif isinstance(fallback_result, list):
+    #                 candidates = fallback_result
+    #             else:
+    #                 candidates = []
+    #             if candidates:
+    #                 structured_movies = candidates
+    #                 break
 
     rag_results = {
-        "vectorial": vectorial_results,
-        "structured": structured_results,
+        "faiss": {
+            "hits": faiss_hits,
+            "best_score": best_faiss_score,
+        },
+        "structured": {
+            "movies": structured_movies,
+        },
     }
 
     # ------------------------------------------------------------------
     # 4. Mise à jour des métadonnées de traçabilité
     # ------------------------------------------------------------------
-    # On fusionne avec les métadonnées déjà présentes pour ne pas
-    # écraser d'autres traces (ex. horodatage posé par un middleware).
-
     metadata = state.get("metadata", {})
     metadata.update(
         {
             "rag_node_executed": True,
-            "vectorial_chunks_count": (
-                len(vectorial_results) if isinstance(vectorial_results, list) else 0
-            ),
-            "structured_records_count": (
-                len(structured_results) if isinstance(structured_results, list) else 0
-            ),
+            "vectorial_chunks_count": len(faiss_hits),
+            "structured_records_count": len(structured_movies),
             "films_found": [
                 record.get("title")
-                for record in structured_results
+                for record in structured_movies
                 if isinstance(record, dict) and record.get("title")
-            ]
-            if isinstance(structured_results, list)
-            else [],
+            ],
         }
     )
 
@@ -171,11 +238,46 @@ def scraper_node(state: AgentState) -> dict:
                 movie_title = movies[0].get("title")
                 print(f"[Scraper] Titre extrait du SQL structuré : {movie_title}")
 
-    # Priorité 2 : fallback sur la query brute
+    # Priorité 2 : noms propres détectés dans la question utilisateur
+    # On isole les mots capitalisés (hors premier mot de phrase) pour former
+    # un titre candidat. Exemple : "Parle-moi de The Exorcist" → "The Exorcist".
+    if not movie_title:
+        stopwords = {
+            "le", "la", "les", "un", "une", "des", "du", "de", "et", "en",
+            "par", "pour", "avec", "son", "sa", "ses", "ce", "cet", "cette",
+            "ces", "mon", "ton", "ma", "ta", "qui", "que", "dans", "sur",
+            "au", "aux", "je", "tu", "il", "elle", "nous", "vous", "ils",
+            "elles", "me", "te", "se", "y", "a", "est", "ont", "sont",
+        }
+        words = query.split()
+        # On ignore le premier mot (risque de majuscule de début de phrase)
+        candidates = [
+            w for w in (words[1:] if len(words) > 1 else words)
+            if w and w[0].isupper() and w.lower().rstrip(",.;:!?") not in stopwords
+        ]
+        if candidates:
+            movie_title = " ".join(candidates)
+            print(f"[Scraper] Titre candidat depuis noms propres : {movie_title}")
+
+    # Priorité 3 : titre depuis le meilleur hit FAISS (corpus vectoriel)
+    if not movie_title and isinstance(rag_results, dict):
+        faiss = rag_results.get("faiss", {})
+        if isinstance(faiss, dict):
+            hits = faiss.get("hits", [])
+            if hits:
+                best_hit = hits[0]
+                text = best_hit.get("text", "")
+                # Extraction simple : cherche "Titre: X" ou "Title: X" dans le chunk
+                m = re.search(r"(?i)Titre\s*:\s*([^\n|\r]+)", text)
+                if m:
+                    movie_title = m.group(1).strip()
+                    print(f"[Scraper] Titre extrait du hit FAISS : {movie_title}")
+
+    # Priorité 4 : dernier recours — query brute
     if not movie_title:
         movie_title = query.strip()
-        print(f"[Scraper] Titre fallback depuis query : {movie_title}")
-
+        print(f"[Scraper] Titre fallback depuis query brute : {movie_title}")
+   
     # ── Appel outil web ──
     raw_content = enrich_from_web(movie_title)
 

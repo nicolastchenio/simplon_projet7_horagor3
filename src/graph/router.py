@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 #   - Requêtes hors sujet  : best_score ∈ [0.12, 0.45]
 #
 # Seuil retenu pour éviter les faux positifs sans être trop restrictif :
-FAISS_COSINE_THRESHOLD: float = 0.65
+FAISS_COSINE_THRESHOLD: float = 0.60
 """Cosine similarity minimale du meilleur hit FAISS pour considérer le
 résultat vectoriel comme sémantiquement pertinent."""
 
@@ -87,54 +87,45 @@ def route_after_rag(state: dict[str, Any]) -> Literal["narration", "scraper"]:
     """Aiguille le graphe après le nœud RAG.
 
     Logique déterministe :
-    1. Si la base structurée est vide → ``"scraper"`` (signal fort de bascule).
-    2. Si le meilleur score FAISS est sous le seuil → ``"scraper"``.
-    3. Sinon → ``"narration"``.
+    - Si FAISS ET structuré sont absents/mauvais → ``"scraper"``.
+    - Si l'un des deux est suffisant → ``"narration"``.
 
-    Args:
-        state: L'état partagé du graphe LangGraph. Doit contenir la clé
-            ``"rag_results"`` conforme au contrat de données.
-
-    Returns:
-        La destination du graphe : ``"narration"`` ou ``"scraper"``.
+    Le seuil FAISS agit comme garde-fou contre l'hallucination
+    sur des requêtes verbeuses (ex. "clown dans les égouts").
     """
     rag_results = state.get("rag_results")
 
-    # ── Garde-fou : si le nœud RAG n'a rien écrit, on part en exploration ──
+    # Garde-fou
     if not rag_results or not isinstance(rag_results, dict):
-        logger.warning("Router: rag_results manquant ou malformé → scraper")
+        logger.warning("Router: rag_results manquant → scraper")
         return "scraper"
 
-    # ── Signal de bascule n°1 : couverture structurée ──
-    # Si query_movie_metadata n'a trouvé aucun film correspondant, on considère
-    # que le sujet n'est pas (ou mal) catalogué localement.
-    if not _structured_has_matches(rag_results):
+    faiss_ok = _faiss_is_relevant(rag_results)
+    struct_ok = _structured_has_matches(rag_results)
+
+    # ── Cas critique : aucun signal exploitable ──
+    if not faiss_ok and not struct_ok:
         logger.info(
-            "Router: base structurée vide (0 film) → scraper "
-            "(même si FAISS a renvoyé %s hit(s))",
-            len(rag_results.get("faiss", {}).get("hits", [])),
+            "Router: FAISS (best=%.3f) et structuré (%s film) tous deux "
+            "insuffisants → scraper",
+            _extract_best_faiss_score(rag_results),
+            len(rag_results.get("structured", {}).get("movies", [])),
         )
         return "scraper"
 
-    # ── Signal de bascule n°2 : qualité vectorielle ──
-    # Un score FAISS faible = risque d'hallucination ou de hors-sujet.
-    if not _faiss_is_relevant(rag_results):
-        best = _extract_best_faiss_score(rag_results)
+    # ── Au moins un signal est bon ──
+    if faiss_ok and not struct_ok:
         logger.info(
-            "Router: best FAISS score %.3f < seuil %.3f → scraper",
-            best,
+            "Router: structuré vide mais FAISS suffisant (%.3f ≥ %.3f) → narration",
+            _extract_best_faiss_score(rag_results),
             FAISS_COSINE_THRESHOLD,
         )
-        return "scraper"
+    elif struct_ok and not faiss_ok:
+        logger.info(
+            "Router: structuré présent (%s film) mais FAISS faible → narration",
+            len(rag_results.get("structured", {}).get("movies", [])),
+        )
+    else:
+        logger.info("Router: FAISS + structuré OK → narration")
 
-    # ── Signal n°3 (optionnel, conservateur) : couverture vectorielle maigre ──
-    # Même avec un bon best_score, si on n'a qu'un seul hit et très peu
-    # de contexte, on peut préférer enrichir. Décommenter si besoin.
-    #
-    # hits_count = len(rag_results.get("faiss", {}).get("hits", []))
-    # if hits_count < 2:
-    #     logger.info("Router: trop peu de contexte vectoriel → scraper")
-    #     return "scraper"
-
-    logger.info("Router: données locales jugées suffisantes → narration")
     return "narration"
