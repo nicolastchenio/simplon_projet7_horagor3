@@ -1091,11 +1091,23 @@ Ne pas oublier l'import si tu utilises datetime :
 ```
 from datetime import datetime
 ```
-Teste-le :
+Tester-le :
 ```
 curl http://localhost:8000/health
 ```
-Tu dois obtenir :
+On doit obtenir :
 ```
 {"status":"ok","service":"horragor-api","timestamp":"2026-07-17T..."}
 ```
+
+# Phase 5 : Frontend Streamlit (Chatbot) #
+## 5.1 Interface Chat (app_frontend.py) ##
+On se concentre uniquement sur l'interface : on veut une page Streamlit fonctionnelle avec les bulles, la zone de saisie et le spinner — mais sans l'appel API pour l'instant (c'est le sujet de la 5.2).
+
+1) Créer le fichier "app_frontend.py" à la racine du projet.
+2) Tester
+   - Lancer l'API (pour l'instant elle n'est pas encore appelée, mais c'est une bonne habitude) :
+   ` uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload `
+   - Dans un second terminal, lance Streamlit : ` streamlit run app_frontend.py `
+   - On doit voir sur url => http://localhost:8501/  l'interface streamlit
+
