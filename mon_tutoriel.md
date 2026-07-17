@@ -917,3 +917,185 @@ if __name__ == "__main__":
         print("=" * 50)
     ```
 3) Lance le test (Ollama doit tourner) : ` uv run python test_pipeline.py `
+
+# Phase 4 : API Backend (FastAPI + Uvicorn) #
+## 4.1 Serveur FastAPI (src/main.py) ##
+Installe les dépendances nécessaires : ` uv add fastapi uvicorn `
+
+1) On va maintenant envelopper tout ça dans un serveur FastAPI (src/main.py) robuste, avec :
+
+   - des modèles Pydantic typés pour l'entrée et la sortie :  
+     on définit le contrat de données : ce que le client envoie et ce que l'API renvoie. Cela valide automatiquement les requêtes et documente l'API.
+     - ChatRequest force le client à envoyer un message non vide.
+     - ChatResponse garantit que le client reçoit toujours la même structure, quelle que soit la réussite ou l'échec interne.
+     - Les Field(description=...) serviront à la documentation auto-générée de FastAPI (/docs).
+     
+   - un lifespan qui compile le graphe une seule fois au démarrage :  
+       On ne veut pas recompiler le StateGraph à chaque requête : c'est coûteux et inutile. FastAPI propose le pattern lifespan pour exécuter du code au démarrage et à l'arrêt du serveur.
+       - yield sépare le boot (avant) du teardown (après).
+       - Le graphe est importé à l'intérieur du lifespan pour éviter les imports circulaires au chargement du module.
+       - _compiled_graph est globale à ce module, mais encapsulée : seul main.py y touche.
+
+   - un endpoint POST /chat qui prépare le state, invoque le graphe, et formate la réponse :
+       - Vérifier que le graphe est chargé.
+       - Créer le AgentState initial.
+       - Appeler graph.invoke(...) sans bloquer la boucle async de FastAPI (on utilise asyncio.to_thread).
+       - Extraire final_answer et reconstruire les sources à partir de rag_results et scraped_data.
+       - Retourner un ChatResponse propre.
+     
+   - une gestion d'erreur propre (HTTP 500 contrôlé, pas de crash brut).
+
+2) Lancer et tester  
+    S'assurer que Ollama tourne et que ton .env est chargé, puis lance le serveur :
+    ` uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000 `
+
+    On doit voir dans la console :
+    ```
+    [lifespan] Compilation du graphe LangGraph en cours...
+    [lifespan] Graphe compilé et prêt.
+    ```
+
+    Puis, dans un autre terminal, teste avec curl :
+    ```
+    curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"Parle-moi de Freddy les griffes de la nuit et de son impact\"}"
+    ```
+    On doit recevoir un JSON du type :
+    ```
+    {
+    "response": "Ah, cher lecteur gothique, permets-moi de te mener...",
+    "sources": [
+        {"type": "faiss", "score": 0.715, "title": "Les Griffes de la nuit", "year": 1984, "preview": "..."},
+        {"type": "sql", "id": 42, "title": "Les Griffes de la nuit", "year": 1984}
+    ],
+    "used_web": false,
+    "thread_id": "a1b2c3d4-..."
+    }
+    ```
+    
+    Autre option => Ouvrir simplement http://localhost:8000/docs dans le navigateur.
+      - Cliquer sur POST /chat
+      - Cliquer sur "Try it out"
+      - Coller un message dans le message du ChatRequest
+      - Cliquer "Execute"
+
+    On verra la réponse JSON directement, sans se battre avec curl
+
+    Et l'UI doc est dispo ici : http://localhost:8000/docs
+
+## 4.2 Gestion de l'historique ##
+Actuellement dans "main.py" à chaque appel on envoie :
+
+```
+initial_state: AgentState = {
+    "query": payload.message,
+    "messages": [],        # ← vide : le message utilisateur n'est pas injecté ici
+    ...
+}
+```
+Conséquence : le MemorySaver restaure bien l'historique précédent depuis le RAM, mais comme tu ne lui ajoutes jamais le nouveau message de l'utilisateur, le narration_node ne peut pas exploiter la conversation en contexte. L'historique est sauvé, mais il est muet.
+
+Dans "src/main.py" :
+
+- Ajoute l'import (avec les autres imports en haut) : ` from langchain_core.messages import HumanMessage `
+- Modifie la construction de initial_state dans chat_endpoint :
+    ```
+        initial_state: AgentState = {
+            "query": payload.message,
+            "messages": [HumanMessage(content=payload.message)],  # ← AJOUTÉ
+            "rag_results": None,
+            "scraped_data": None,
+            "needs_enrichment": None,
+            "final_answer": None,
+            "sources": None,
+            "metadata": {"session_id": str(uuid.uuid4())},
+        }
+    ```
+    Grâce au reducer add_messages, LangGraph va fusionner cette nouvelle liste avec l'historique déjà stocké dans le checkpoint du thread_id. Si c'est la première fois, la liste devient [HumanMessage(...)]. Si c'est le 3ème échange, elle devient [..., AIMessage(...), HumanMessage(...)].
+
+Dans "src/graph/nodes.py" Faire lire la mémoire au narrateur (option mais recommandée) :
+- il faut que le narration_node injecte l'historique dans son prompt. dans narration_node, juste après print(">>> Narration Node") rajouter :
+    ```
+    # ── 0. RÉCUPÉRATION DE LA MÉMOIRE CONVERSATIONNELLE DU THREAD ──
+    # On filtre les bruits techniques (logs RAG / scraper) pour ne garder
+    # que les échanges réels entre le lecteur et le chroniqueur.
+    dialogue_history: list[str] = []
+    for msg in state.get("messages", []):
+        if isinstance(msg, HumanMessage):
+            dialogue_history.append(f"LECTEUR : {msg.content}")
+        elif isinstance(msg, AIMessage):
+            # On saute les résumés des nœuds internes
+            if msg.content.startswith("Recherche RAG") or msg.content.startswith("🔍 Scraping"):
+                continue
+            # Pour le message de narration, on isole la réponse textuelle proprement dite
+            text = msg.content
+            if text.startswith("🖋️") and "\n\n" in text:
+                text = text.split("\n\n", 1)[1]
+            dialogue_history.append(f"HORRAGOR : {text.strip()}")
+
+    # La dernière entrée est la requête actuelle (injectée par main.py) → on l'exclut du passé
+    memory_block = ""
+    if len(dialogue_history) > 1:
+        memory_block = "--- CONTEXTE DU DIALOGUE ---\n" + "\n".join(dialogue_history[:-1]) + "\n\n"
+    ```
+- Puis, modifie le bloc human_parts pour insérer cette mémoire 
+    ```
+    human_parts = [
+        f"QUESTION DU LECTEUR : {query}",
+        "",
+        memory_block + "--- ENCYCLOPÉDIE HORRAGOR ---",
+        encyclopedic_context,
+    ]
+    ```
+- modifier le le system_prompt pour légitimer la mémoire (une ligne suffit) :
+    ```
+    system_prompt = (
+        "Tu es HorRAGor, chroniqueur de cinéma d'horreur gothique, vêtu d'une redingote noire "
+        "et armé d'une plume d'argent. Tu peux considérer le CONTEXTE DU DIALOGUE ci-dessus "
+        "pour adapter ton ton et tes références, mais les faits doivent impérativement provenir "
+        "de l'ENCYCLOPÉDIE et des OUTILS fournis ci-dessous. "
+        "Règles absolues :\n"
+        "1. Base-toi exclusivement sur les sections FICHES, EXTRAITS, ENRICHISSEMENT et Outils.\n"
+        "2. Si la réponse n'est pas dans le corpus, avoue-le avec élégance gothique ; n'invente jamais.\n"
+        "3. Ne invente aucun titre, réalisateur, date, ou intrigue.\n"
+        "4. Sépare clairement chaque film si le corpus en mentione plusieurs.\n"
+        "5. Utilise les RECOMMANDATIONS uniquement si elles sont fournies par l'outil.\n"
+        "6. Termine toujours par une signature macabre appropriée."
+    )
+    ```
+
+Test rapide pour valider, dans le terminal :
+```
+# Thread 1 : présentation
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"Je m'appelle Alice et j'adore l'horreur psychologique\", \"thread_id\": \"memo-test-777\"}"
+
+# Thread 2 : question de mémoire (même thread_id)
+curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"Quel est mon prénom et quel genre horrifique j'aime ?\", \"thread_id\": \"memo-test-777\"}"
+```
+
+## 4.3 Endpoint de santé ##
+C'est une ligne à ajouter dans src/main.py pour exposer une santé du système.
+
+
+Dans src/main.py, ajoute simplement cet endpoint à la suite de tes autres routes :
+```
+@app.get("/health")
+async def health_check():
+    """Endpoint minimal pour le monitoring (Uptime Kuma, Phase 8)."""
+    return {
+        "status": "ok",
+        "service": "horragor-api",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+```
+Ne pas oublier l'import si tu utilises datetime :
+```
+from datetime import datetime
+```
+Teste-le :
+```
+curl http://localhost:8000/health
+```
+Tu dois obtenir :
+```
+{"status":"ok","service":"horragor-api","timestamp":"2026-07-17T..."}
+```

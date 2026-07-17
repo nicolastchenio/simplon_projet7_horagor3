@@ -12,7 +12,6 @@ que le moteur fusionnera dans l'``AgentState`` global.
 """
 
 import re
-from langchain_core.messages import AIMessage
 
 from src.models.state import AgentState
 from src.tools.rag_tool import search_local_horror_lore
@@ -315,15 +314,39 @@ def _get_narrator_llm() -> ChatOllama:
 def narration_node(state: AgentState) -> dict:
     """
     Node 3 : L'Écrivain Gothique (Peer-to-Peer).
-    
-    *Isolation stricte* : lit UNIQUEMENT :
-      - state["query"]    → question originale
-      - state["rag_results"]   → corpus structuré + vectoriel
-      - state["scraped_data"]  → enrichissement web éventuel
-    
-    NE LIT JAMAIS state["messages"] (anti-collision de tokens).
+
+    *Isolation stricte sur le corpus* : les faits proviennent UNIQUEMENT de :
+    - state["rag_results"]   → corpus structuré + vectoriel
+    - state["scraped_data"]  → enrichissement web éventuel
+
+    *Mémoire conversationnelle* : state["messages"] est lu UNIQUEMENT pour
+    reconstituer l'historique du thread (ton, prénom du lecteur, sujet précédent).
+    Les bruits techniques (résumés RAG / scraper) sont filtrés.
+
     Produits : final_answer, sources, messages (AIMessage).
     """
+    # ── 0. RÉCUPÉRATION DE LA MÉMOIRE CONVERSATIONNELLE DU THREAD ──
+    # On filtre les bruits techniques (logs RAG / scraper) pour ne garder
+    # que les échanges réels entre le lecteur et le chroniqueur.
+    dialogue_history: list[str] = []
+    for msg in state.get("messages", []):
+        if isinstance(msg, HumanMessage):
+            dialogue_history.append(f"LECTEUR : {msg.content}")
+        elif isinstance(msg, AIMessage):
+            # On saute les résumés des nœuds internes
+            if msg.content.startswith("Recherche RAG") or msg.content.startswith("🔍 Scraping"):
+                continue
+            # Pour le message de narration, on isole la réponse textuelle proprement dite
+            text = msg.content
+            if text.startswith("🖋️") and "\n\n" in text:
+                text = text.split("\n\n", 1)[1]
+            dialogue_history.append(f"HORRAGOR : {text.strip()}")
+
+    # La dernière entrée est la requête actuelle (injectée par main.py) → on l'exclut du passé
+    memory_block = ""
+    if len(dialogue_history) > 1:
+        memory_block = "--- CONTEXTE DU DIALOGUE ---\n" + "\n".join(dialogue_history[:-1]) + "\n\n"
+    
     print(">>> Narration Node")
 
     query: str = state.get("query", "")
@@ -424,8 +447,9 @@ def narration_node(state: AgentState) -> dict:
     # ── 3. PROMPT SYSTÈME ULTRA-SPÉCIALISÉ (anti-hallucination) ──
     system_prompt = (
         "Tu es HorRAGor, chroniqueur de cinéma d'horreur gothique, vêtu d'une redingote noire "
-        "et armé d'une plume d'argent. Tu ne disposes d'aucune mémoire externe. "
-        "Tu dois te baser UNIQUEMENT sur les données encyclopédiques et les outils fournis ci-dessous. "
+        "et armé d'une plume d'argent. Tu peux considérer le CONTEXTE DU DIALOGUE ci-dessus "
+        "pour adapter ton ton et tes références, mais les faits doivent impérativement provenir "
+        "de l'ENCYCLOPÉDIE et des OUTILS fournis ci-dessous. "
         "Règles absolues :\n"
         "1. Base-toi exclusivement sur les sections FICHES, EXTRAITS, ENRICHISSEMENT et Outils.\n"
         "2. Si la réponse n'est pas dans le corpus, avoue-le avec élégance gothique ; n'invente jamais.\n"
@@ -438,7 +462,7 @@ def narration_node(state: AgentState) -> dict:
     human_parts = [
         f"QUESTION DU LECTEUR : {query}",
         "",
-        "--- ENCYCLOPÉDIE HORRAGOR ---",
+        memory_block + "--- ENCYCLOPÉDIE HORRAGOR ---",
         encyclopedic_context,
     ]
     if tool_context:
