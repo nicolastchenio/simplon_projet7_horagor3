@@ -1129,14 +1129,11 @@ Le API_TIMEOUT à 120 s est volontaire : si le graphe LangChain doit scraper Wik
 le cœur de la communication. Cette fonction isole tout le réseau (erreurs comprise) pour ne pas faire crasher l'interface si l'API est éteinte.
 3) Fonction utilitaire de rendu des sources
 Pour éviter de dupliquer le code entre l'affichage de l'historique et l'affichage temps réel, on crée une petite fonction interne. Au lieu d'afficher str(source) brut, on déstructure le dict réel. Si title est None, on tombe sur un intitulé par défaut. Si preview est vide, on affiche une mention d'indisponibilité plutôt qu'un champ vide.
-
-
-
-3) Mise à jour de l'affichage de l'historique  
+4) Mise à jour de l'affichage de l'historique  
 En 5.1, nos messages étaient des {"role": ..., "content": ...}. Maintenant, un message assistant peut transporter aussi les sources et les metadata. Il faut donc enrichir display_chat_history pour ré-afficher ces extras quand Streamlit réexécute le script.
-4) Wiring — remplacement de la simulation par l'appel réel  
+5) Wiring — remplacement de la simulation par l'appel réel  
 On réécrit handle_user_input. Le principe reste le même (input → affichage user → spinner → affichage bot), mais on appelle maintenant call_chat_api, et on stocke l'intégralité de la réponse (texte + sources + metadata) dans l'historique.
-5) Vérification de la fonction main  
+6) Vérification de la fonction main  
 La fonction main et init_session_state restent globalement identiques à la 5.1.
 
 Refaire le teste faite en 5.1 :
@@ -1145,3 +1142,16 @@ Refaire le teste faite en 5.1 :
 - La réponse textuelle du bot apparaît.
 - Si le backend renvoie une liste dans "sources", un encart 📚 Sources utilisées apparaît sous la réponse.
 - Si le backend renvoie "metadata": {"enriched_from_web": true}, le caption 🔍 Enrichi via le Web est visible
+
+## 5.3 Sécurisation minimale ##
+Il ne reste qu'une ligne à ajouter : le header X-API-Key dans le client httpx. C'est un placeholder pour préparer la Phase 7 (vraie authentification).
+
+Modification de call_chat_api, Remplacer juste le bloc headers au début de la fonction par celui-ci :
+```
+headers = {
+    "Content-Type": "application/json",
+    "X-API-Key": API_KEY,  # Phase 5.3 : header préparatoire pour l'authentification
+}
+```
+
+Le reste de la fonction reste inchangé. Le API_KEY est déjà défini en haut du fichier : ` API_KEY: str = "placeholder-horragor-key" `

@@ -46,72 +46,48 @@ def init_session_state() -> None:
 def call_chat_api(question: str, thread_id: str) -> dict:
     """
     Envoie une question au endpoint ``POST /chat`` du backend.
-
-    La fonction sérialise la question et l'identifiant de thread dans
-    un JSON conforme au modèle ``ChatRequest`` du backend, puis
-    retourne la réponse désérialisée.
-
-    Paramètres
-    ----------
-    question : str
-        Texte brut saisi par l'utilisateur dans le champ de chat.
-    thread_id : str
-        Identifiant de session conservé dans ``st.session_state``.
-        Permet au backend de récupérer l'historique via ``MemorySaver``.
-
-    Retourne
-    -------
-    dict
-        Dictionnaire contenant au minimum la clé ``"response"``.
-        Peut aussi contenir ``"sources"`` (list) et ``"metadata"`` (dict).
-        Retourne un dictionnaire vide si le backend est injoignable.
-
-    Exemple de réponse attendue
-    ---------------------------
-    .. code-block:: json
-
-        {
-            "response": "Le film 'The Cabin in the Woods' ...",
-            "sources": [
-                {"page_content": "...", "metadata": {"title": "Cabin Wiki"}}
-            ],
-            "metadata": {"enriched_from_web": true}
-        }
     """
-    endpoint: str = f"{API_BASE_URL}/chat"
+    url: str = f"{API_BASE_URL}/chat"
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Key": API_KEY,
+    }
     payload: dict = {
         "message": question,
         "thread_id": thread_id,
     }
-    headers: dict = {
-        "Content-Type": "application/json",
-        "X-API-Key": API_KEY,  # Accepté par le backend, même s'il n'est pas encore vérifié
-    }
 
     try:
-        # ``httpx.Client`` en context manager assure la fermeture propre de la connexion
         with httpx.Client(timeout=API_TIMEOUT) as client:
-            response = client.post(endpoint, json=payload, headers=headers)
-            response.raise_for_status()  # Déclenche une exception si 4xx ou 5xx
-            return response.json()
-    except httpx.ConnectError:
-        # Le serveur est éteint ou le port est inaccessible
-        st.error(
-            "🚨 **Connexion refusée.** "
-            "Vérifiez que le serveur FastAPI est bien lancé sur le port 8000."
-        )
-        return {}
+            resp: httpx.Response = client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    except httpx.ConnectError as exc:
+        return {
+            "response": "Impossible de joindre l'entité HorRAGor (backend hors ligne).",
+            "sources": [],
+            "metadata": {},
+        }
+
     except httpx.HTTPStatusError as exc:
-        # Le serveur a répondu mais avec un code d'erreur
-        st.error(
-            f"🚨 **Erreur HTTP {exc.response.status_code}** : "
-            f"{exc.response.text[:200]}"
-        )
-        return {}
+        detail: str = "Erreur interne du backend."
+        try:
+            detail = exc.response.json().get("detail", detail)
+        except Exception:
+            pass
+        return {
+            "response": f"L'API a retourné une erreur : {detail}",
+            "sources": [],
+            "metadata": {},
+        }
+
     except Exception as exc:
-        # Filet de sécurité pour toute autre erreur (timeout, JSON invalide, etc.)
-        st.error(f"🚨 **Erreur inattendue** : {exc}")
-        return {}
+        return {
+            "response": f"Erreur inattendue lors de l'invocation : {exc}",
+            "sources": [],
+            "metadata": {},
+        }
     
 def _render_source(source: dict, index: int) -> None:
     """
