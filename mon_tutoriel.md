@@ -1111,3 +1111,37 @@ On se concentre uniquement sur l'interface : on veut une page Streamlit fonction
    - Dans un second terminal, lance Streamlit : ` streamlit run app_frontend.py `
    - On doit voir sur url => http://localhost:8501/  l'interface streamlit
 
+## 5.2 Communication avec l'API ##
+On remplace la simulation par un vrai appel HTTP vers ton FastAPI.
+
+Pré-requis : ton backend (uvicorn src.main:app --port 8000) doit être lancé. Le contrat attendu côté frontend est le JSON que renvoie ton ChatResponse :
+```
+{
+  "response": "Le film d'horreur...",
+  "sources": [...],
+  "metadata": {"enriched_from_web": true}
+}
+```
+
+1) On retire time (inutile maintenant) et on ajoute httpx. On définit aussi les constantes de connexion, y compris le placeholder X-API-Key pour la 5.3.  
+Le API_TIMEOUT à 120 s est volontaire : si le graphe LangChain doit scraper Wikipédia, on ne veut pas couper la connexion au bout de 5 secondes.
+2) Fonction d'appel au backend => def call_chat_api(question: str, thread_id: str)  
+le cœur de la communication. Cette fonction isole tout le réseau (erreurs comprise) pour ne pas faire crasher l'interface si l'API est éteinte.
+3) Fonction utilitaire de rendu des sources
+Pour éviter de dupliquer le code entre l'affichage de l'historique et l'affichage temps réel, on crée une petite fonction interne. Au lieu d'afficher str(source) brut, on déstructure le dict réel. Si title est None, on tombe sur un intitulé par défaut. Si preview est vide, on affiche une mention d'indisponibilité plutôt qu'un champ vide.
+
+
+
+3) Mise à jour de l'affichage de l'historique  
+En 5.1, nos messages étaient des {"role": ..., "content": ...}. Maintenant, un message assistant peut transporter aussi les sources et les metadata. Il faut donc enrichir display_chat_history pour ré-afficher ces extras quand Streamlit réexécute le script.
+4) Wiring — remplacement de la simulation par l'appel réel  
+On réécrit handle_user_input. Le principe reste le même (input → affichage user → spinner → affichage bot), mais on appelle maintenant call_chat_api, et on stocke l'intégralité de la réponse (texte + sources + metadata) dans l'historique.
+5) Vérification de la fonction main  
+La fonction main et init_session_state restent globalement identiques à la 5.1.
+
+Refaire le teste faite en 5.1 :
+- poser une question → bulle user immédiate.
+- Le spinner « consulte les archives... » s'affiche pendant 1 à 30 s (selon ta chaîne RAG).
+- La réponse textuelle du bot apparaît.
+- Si le backend renvoie une liste dans "sources", un encart 📚 Sources utilisées apparaît sous la réponse.
+- Si le backend renvoie "metadata": {"enriched_from_web": true}, le caption 🔍 Enrichi via le Web est visible

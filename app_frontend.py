@@ -1,174 +1,322 @@
 """
-Interface utilisateur Streamlit du projet HorRAGor.
+Interface utilisateur Streamlit du projet HorRAGor (Phase 5.2).
 
-Ce module implémente le frontend du chatbot (Phase 5). Il gère
-l'affichage de l'historique de conversation sous forme de bulles,
-la saisie utilisateur et le feedback visuel (spinner) pendant
-le traitement des requêtes par le backend RAG.
-
-L'appel réseau vers l'API FastAPI (``localhost:8000/chat``) sera
-intégré lors de la Phase 5.2.
+Ce module relie le frontend au backend RAG via des appels HTTP
+synchrones avec ``httpx``. Il gère l'affichage des bulles,
+la persistance de la conversation par ``thread_id``, ainsi que
+le rendu des sources et des indicateurs de scraping.
 
 .. note::
-    Pour l'instant, la réponse du bot est simulée afin de valider
-    le rendu graphique de l'interface.
+    Le backend FastAPI doit être accessible sur ``localhost:8000``
+    pour que le chat fonctionne.
 """
 
-import uuid  # Permet de générer un identifiant unique de conversation
-import time  # Utilisé temporairement pour simuler la latence de l'API
+import uuid  # Génération d'identifiant unique de conversation
+
+import httpx  # Client HTTP moderne, remplace ``requests`` et ``urllib``
 
 import streamlit as st  # Framework de l'interface web
+
+
+# --- Configuration centralisée de la connexion au backend --------------------
+API_BASE_URL: str = "http://localhost:8000"  # Racine de l'API FastAPI
+API_TIMEOUT: float = 120.0  # Durée max d'attente (le RAG peut être lent)
+
+# Phase 5.3 (préparation) : clé API en dur pour l'instant.
+# Cette valeur sera externalisée (variables d'environnement) en Phase 7.
+API_KEY: str = "placeholder-horragor-key"
 
 def init_session_state() -> None:
     """
     Initialise les variables persistantes dans la session Streamlit.
 
-    Cette fonction s'assure que les clés suivantes existent dans
-    ``st.session_state`` dès le premier chargement de la page :
+    Crée deux clés dans ``st.session_state`` si elles sont absentes :
 
-    - ``messages`` : liste des échanges (bulles affichées).
-    - ``thread_id`` : identifiant unique de conversation, transmis
-      au backend pour gérer l'historique via ``MemorySaver``.
-
-    .. warning::
-        Cette fonction doit être appelée avant tout affichage
-        pour éviter les erreurs d'accès à des clés inexistantes.
+    - ``messages`` : liste des échanges (historique de conversation).
+    - ``thread_id`` : identifiant UUID v4 servant de clé de session
+      pour la mémorisation côté backend (``MemorySaver``).
     """
-    # Historique des messages : chaque entrée est un dictionnaire
-    # décrivant un échange (rôle, contenu, sources éventuelles).
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Identifiant de conversation (thread) pour la mémoire LangGraph.
-    # Généré une seule fois et conservé tant que l'onglet est ouvert.
     if "thread_id" not in st.session_state:
+        # Génération d'un nouvel identifiant à chaque session navigateur
         st.session_state.thread_id = str(uuid.uuid4())
-        
+
+def call_chat_api(question: str, thread_id: str) -> dict:
+    """
+    Envoie une question au endpoint ``POST /chat`` du backend.
+
+    La fonction sérialise la question et l'identifiant de thread dans
+    un JSON conforme au modèle ``ChatRequest`` du backend, puis
+    retourne la réponse désérialisée.
+
+    Paramètres
+    ----------
+    question : str
+        Texte brut saisi par l'utilisateur dans le champ de chat.
+    thread_id : str
+        Identifiant de session conservé dans ``st.session_state``.
+        Permet au backend de récupérer l'historique via ``MemorySaver``.
+
+    Retourne
+    -------
+    dict
+        Dictionnaire contenant au minimum la clé ``"response"``.
+        Peut aussi contenir ``"sources"`` (list) et ``"metadata"`` (dict).
+        Retourne un dictionnaire vide si le backend est injoignable.
+
+    Exemple de réponse attendue
+    ---------------------------
+    .. code-block:: json
+
+        {
+            "response": "Le film 'The Cabin in the Woods' ...",
+            "sources": [
+                {"page_content": "...", "metadata": {"title": "Cabin Wiki"}}
+            ],
+            "metadata": {"enriched_from_web": true}
+        }
+    """
+    endpoint: str = f"{API_BASE_URL}/chat"
+    payload: dict = {
+        "message": question,
+        "thread_id": thread_id,
+    }
+    headers: dict = {
+        "Content-Type": "application/json",
+        "X-API-Key": API_KEY,  # Accepté par le backend, même s'il n'est pas encore vérifié
+    }
+
+    try:
+        # ``httpx.Client`` en context manager assure la fermeture propre de la connexion
+        with httpx.Client(timeout=API_TIMEOUT) as client:
+            response = client.post(endpoint, json=payload, headers=headers)
+            response.raise_for_status()  # Déclenche une exception si 4xx ou 5xx
+            return response.json()
+    except httpx.ConnectError:
+        # Le serveur est éteint ou le port est inaccessible
+        st.error(
+            "🚨 **Connexion refusée.** "
+            "Vérifiez que le serveur FastAPI est bien lancé sur le port 8000."
+        )
+        return {}
+    except httpx.HTTPStatusError as exc:
+        # Le serveur a répondu mais avec un code d'erreur
+        st.error(
+            f"🚨 **Erreur HTTP {exc.response.status_code}** : "
+            f"{exc.response.text[:200]}"
+        )
+        return {}
+    except Exception as exc:
+        # Filet de sécurité pour toute autre erreur (timeout, JSON invalide, etc.)
+        st.error(f"🚨 **Erreur inattendue** : {exc}")
+        return {}
+    
+def _render_source(source: dict, index: int) -> None:
+    """
+    Affiche une source documentaire dans un format lisible.
+
+    Cette fonction gère le format réel retourné par l'API HorRAGor
+    (``type``, ``score``, ``title``, ``year``, ``preview``). Si les
+    champs sont partiellement vides, elle adapte le rendu pour éviter
+    les encarts vides ou le JSON brut.
+
+    Paramètres
+    ----------
+    source : dict
+        Dictionnaire représentant une source du RAG.
+    index : int
+        Numéro d'ordre de la source (affiché devant le titre).
+    """
+    # Extraction défensive : chaque champ peut être absent ou None
+    source_type: str = source.get("type", "inconnu")
+    score: float | None = source.get("score")
+    title: str | None = source.get("title")
+    year: int | None = source.get("year")
+    preview: str = source.get("preview", "")
+
+    # Détermination du titre affiché
+    display_title: str = title if title else f"Source {index} ({source_type})"
+
+    # En-tête de la source
+    st.markdown(f"**{index}. {display_title}**")
+
+    # Ligne de métadonnées (score + année)
+    meta_parts: list[str] = []
+    if year is not None:
+        meta_parts.append(f"Année : {year}")
+    if score is not None:
+        meta_parts.append(f"Score : {score:.3f}")
+    if meta_parts:
+        st.caption(" · ".join(meta_parts))
+
+    # Aperçu du contenu
+    if preview:
+        # Limite à 300 caractères pour garder l'encart compact
+        snippet: str = preview if len(preview) <= 300 else preview[:297] + "..."
+        st.caption(f"> {snippet}")
+    else:
+        st.caption("*Aucun aperçu disponible pour cette entrée.*")
+
+    st.divider()
+
 def display_chat_history() -> None:
     """
-    Parcourt et affiche l'historique des messages en mémoire.
+    Affiche l'intégralité de la conversation depuis ``st.session_state``.
 
-    Utilise :func:`streamlit.chat_message` pour rendre chaque échange
-    sous forme de bulle. Les rôles reconnus sont ``user`` et
-    ``assistant`` (avatars différents automatiquement).
+    Cette fonction boucle sur les messages stockés et restitue :
 
-    Si un message contient des sources (clé ``sources``), celles-ci
-    sont affichées dans un encart repliable sous la bulle du bot.
+    - Les bulles utilisateur (texte simple).
+    - Les bulles assistant (texte + sources + badge de scraping).
+
+    .. note::
+        Les sources et métadonnées ne sont affichées que si elles ont
+        été préalablement stockées dans le message assistant.
     """
-    # Boucle sur tous les messages stockés dans la session
-    for message in st.session_state.messages:
-        role = message.get("role", "assistant")
-        content = message.get("content", "")
+    for msg in st.session_state.messages:
+        role: str = msg.get("role", "assistant")
 
-        # Affichage de la bulle avec l'avatar adapté (👤 / 🤖)
         with st.chat_message(role):
-            st.markdown(content)
+            # Contenu textuel principal
+            st.markdown(msg.get("content", ""))
 
-            # Encart pour les métadonnées de type "source" (préparation Phase 5.2)
-            sources = message.get("sources")
-            if sources:
-                with st.expander("📚 Sources consultées", expanded=False):
-                    for src in sources:
-                        st.caption(f"• {src}")
-                        
+            # --- Rendu spécifique aux réponses du bot -----------------------
+            if role == "assistant":
+                metadata: dict = msg.get("metadata") or {}
+
+                # Badge indiquant un passage par le scraper Wikipédia
+                if metadata.get("enriched_from_web") is True:
+                    st.caption("🔍 Enrichi via le Web")
+
+                # Encart dépliable listant les sources du RAG
+                sources: list = msg.get("sources", [])
+                if sources:
+                    with st.expander("📚 Sources utilisées", expanded=False):
+                        for idx, source in enumerate(sources, start=1):
+                            if isinstance(source, dict):
+                                _render_source(source, idx)
+                            else:
+                                # Filet de sécurité si une source serait une chaîne
+                                st.markdown(f"**{idx}.** {str(source)[:300]}")
+                                st.divider()
+
 def handle_user_input() -> None:
     """
-    Gère la saisie utilisateur et l'affichage de la réponse du bot.
+    Gère le cycle complet : saisie utilisateur → appel API → affichage bot.
 
-    1. Capture le texte via :func:`streamlit.chat_input`.
-    2. Ajoute immédiatement la bulle utilisateur à l'historique.
-    3. Déclenche un spinner visuel pendant le "traitement".
-    4. Simule une réponse (placeholder) et l'affiche en bulle assistant.
+    Cette fonction orchestre l'interaction :
 
-    .. todo::
-        Remplacer la simulation ``time.sleep`` par un appel ``httpx``
-        vers le endpoint ``POST /chat`` du backend (Phase 5.2).
+    1. Récupère la saisie via ``st.chat_input``.
+    2. Affiche immédiatement la bulle utilisateur.
+    3. Déclenche l'appel au backend dans un **spinner**.
+    4. Affiche la réponse, les sources et le badge éventuel.
+    5. Persiste le message assistant (y compris ses métadonnées) dans le
+       ``session_state`` pour les prochains rafraîchissements.
     """
-    # Zone de saisie fixée en bas de l'écran.
-    # Renvoie ``None`` tant que l'utilisateur n'a pas appuyé sur Entrée.
-    user_message = st.chat_input("Parlez à l'entité HorRAGor...")
-
-    if user_message:
-        # -- 1. Stockage et affichage immédiat du message utilisateur --
-        st.session_state.messages.append({
-            "role": "user",
-            "content": user_message,
-            "sources": None
-        })
+    if prompt := st.chat_input("Poser moi une question..."):
+        # 1. Persistance et affichage immédiat du message utilisateur
+        user_msg = {"role": "user", "content": prompt}
+        st.session_state.messages.append(user_msg)
 
         with st.chat_message("user"):
-            st.markdown(user_message)
+            st.markdown(prompt)
 
-        # -- 2. Phase de "réflexion" du bot avec spinner --
-        # Le bloc ``with st.spinner()`` affiche une animation en haut de
-        # l'écran pendant que le backend (simulé ici) travaille.
-        with st.spinner("L'entité HorRAGor consulte les archives..."):
-            # SIMULATION (à supprimer dès la Phase 5.2) :
-            # On attend 1,5 seconde pour imiter la latence réseau + RAG.
-            time.sleep(1.5)
-
-            # Réponse factice permettant de valider le rendu de l'UI.
-            # En vrai, ce contenu proviendra de la clé ``response`` du JSON
-            # renvoyé par FastAPI.
-            bot_content = (
-                f"**Écho de l'entité :** j'ai capté votre message.\n\n"
-                f"🔗 *La vraie connexion API sera établie en Phase 5.2*\n\n"
-                f"🆔 Thread ID : `{st.session_state.thread_id}`"
-            )
-            bot_sources = []  # Placeholder : liste des chunks/scraper metadata
-
-        # -- 3. Stockage et affichage de la réponse assistant --
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": bot_content,
-            "sources": bot_sources
-        })
-
+        # 2. Appel au backend avec retour visuel pendant la latence
         with st.chat_message("assistant"):
-            st.markdown(bot_content)
-            
+            with st.spinner("L'entité HorRAGor consulte les archives..."):
+                response_data: dict = call_chat_api(
+                    question=prompt,
+                    thread_id=st.session_state.thread_id,
+                )
+
+            # 3. Traitement de la réponse ou gestion d'une erreur vide
+            if response_data:
+                answer_text: str = response_data.get("response", "")
+                st.markdown(answer_text)
+
+                # Badge scraper (affiché seulement si le backend l'indique)
+                metadata: dict = response_data.get("metadata") or {}
+                if metadata.get("enriched_from_web") is True:
+                    st.caption("🔍 Enrichi via le Web")
+
+                # Encart des sources (affiché seulement si la liste est non vide)
+                sources: list = response_data.get("sources", [])
+                if sources:
+                    with st.expander("📚 Sources utilisées", expanded=False):
+                        for idx, source in enumerate(sources, start=1):
+                            if isinstance(source, dict):
+                                _render_source(source, idx)
+                            else:
+                                st.markdown(f"**{idx}.** {str(source)[:300]}")
+                                st.divider()
+
+                # 4. Stockage riche dans l'historique pour persistance complète
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": answer_text,
+                    "sources": sources,
+                    "metadata": metadata,
+                }
+                st.session_state.messages.append(assistant_msg)
+
+            else:
+                # ``call_chat_api`` a déjà affiché l'erreur via ``st.error``,
+                # mais on sauvegarde un message d'échec pour l'historique.
+                error_text: str = "Désolé, je n'ai pas pu contacter les archives."
+                st.error(error_text)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": error_text,
+                    "sources": [],
+                    "metadata": {},
+                })
+  
 def main() -> None:
     """
-    Point d'entrée principal de l'application Streamlit.
+    Point d'entrée de l'application Streamlit.
 
-    Configure la page (titre, icône, layout), initialise l'état de
-    session, affiche l'historique existant et se met en écoute des
-    nouvelles entrées utilisateur.
+    Configure la page, initialise l'état, affiche l'historique existant
+    et écoute les nouvelles questions utilisateur.
     """
-    # Configuration du rendu de la page dans le navigateur
     st.set_page_config(
         page_title="HorRAGor - Archives Vivantes",
-        page_icon="🧠",            # Emoji de l'onglet
-        layout="centered",         # Design centré, lisible sur mobile
+        page_icon="🧠",
+        layout="centered",
         initial_sidebar_state="collapsed"
     )
 
-    # En-tête visuel de l'application
+    # --- Style minimal : suppression de la bannière "Help agents" (optionnel) ---
+    st.markdown(
+        """
+        <style>
+        [data-testid="stToolbar"] {display: none !important;}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
     st.title("🧠 HorRAGor")
     st.caption(
-        "Assistant conversationnel pour l'exploration des archives de l'ESILV — "
+        "L'agent ia de l'horreur (il connait tout les films sur l'horreur) — "
         "Projet Simplon Data Engineer"
     )
     st.divider()
 
-    # Initialisation des variables de session (historique + thread_id)
+    # Initialisation et affichage
     init_session_state()
-
-    # Affichage des bulles déjà présentes en mémoire
     display_chat_history()
-
-    # Écoute et traitement de la saisie interactive
     handle_user_input()
 
-    # -- Sidebar informative (optionnel, utile pour le debug / la soutenance) --
+    # Sidebar de debug / contexte
     with st.sidebar:
         st.header("🔧 Contexte technique")
         st.markdown(
             f"- **Thread ID :** `{st.session_state.thread_id}`\n"
             f"- **Messages en mémoire :** {len(st.session_state.messages)}\n"
-            f"- **Étape en cours :** 5.1 (UI nude)"
+            f"- **Backend visé :** `{API_BASE_URL}`"
         )
-
+        
 
 if __name__ == "__main__":
     main()
