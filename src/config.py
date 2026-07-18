@@ -80,3 +80,12 @@ FAISS_COSINE_THRESHOLD: float = float(
 # Hyper-paramètres des scripts de maintenance (batchs)
 # ═══════════════════════════════════════════════════════════════
 BATCH_SIZE_PGVECTOR: int = int(os.getenv("BATCH_SIZE_PGVECTOR", "500"))
+
+# ═══════════════════════════════════════════════════════════════
+# Service interne data-api (Phase 6)
+# ═══════════════════════════════════════════════════════════════
+# URL complète vers le micro-service d'accès aux données.
+# En dev c'est localhost:8001, en Docker ce sera http://data-api:8001
+# sur le réseau interne.
+# ═══════════════════════════════════════════════════════════════
+DATA_API_URL: str = os.getenv("DATA_API_URL", "http://localhost:8001")

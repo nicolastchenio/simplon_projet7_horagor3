@@ -1188,3 +1188,62 @@ Le reste de la fonction reste inchangé. Le API_KEY est déjà défini en haut d
 5) modifier src/graph/nodes.py
    test a faire : ` python -c "from src.graph.nodes import _get_narrator_llm; llm = _get_narrator_llm(); print(llm.model, llm.base_url)" `
 6) modifier data/build_faiss_index.py
+
+# Phase 6 : Extraction de la Couche Données (API dédiée) #
+
+Actuellement, rag_tool.py ouvre une connexion directe à Supabase avec psycopg2. C'est pratique en développement, mais c'est une faille d'architecture :
+- Le mot de passe Supabase transite dans le code du backend métier.
+- Si on change de base, tu dois modifier tous les outils.
+- La couche "accès aux données" n'est pas testable / mockable proprement.
+
+L'idée est donc de créer un service FastAPI dédié, interne, qui sera le seul à parler à PostgreSQL. Ton API principale (src/main.py, port 8000) deviendra un client HTTP de ce nouveau service (data_api, port 8001).On respecte le principe : "La base est inaccessible depuis l'extérieur du cluster".
+
+## 6.1 Créer le service data_api ##
+
+1) Creation de l'architecture :
+    ```
+    horragor-project/
+    ├── data_api/      ← (NOUVEAU)
+    │   ├── __init__.py
+    │   ├── database.py
+    │   ├── models.py
+    │   ├── main.py
+    │   └── routers/
+    │       ├── __init__.py
+    │       └── films.py
+
+2) data_api/database.py  
+On utilise un pool de connexions synchrones. FastAPI exécute les fonctions def dans un threadpool, donc le service reste non-bloquant.
+
+3) data_api/models.py  
+On définit les schémas de données. Le modèle FilmDetail est la représentation canonique d'un film dans notre API.
+
+4) data_api/routers/films.py
+C'est ici qu'on écrit les endpoints qui remplaceront les requêtes brutes de rag_tool.py.
+
+5) data_api/main.py
+
+6) dans src/config.py rajouter 
+    ```
+    # ═══════════════════════════════════════════════════════════════
+    # Service interne data-api (Phase 6)
+    # ═══════════════════════════════════════════════════════════════
+    # URL complète vers le micro-service d'accès aux données.
+    # En dev c'est localhost:8001, en Docker ce sera http://data-api:8001
+    # sur le réseau interne.
+    # ═══════════════════════════════════════════════════════════════
+    DATA_API_URL: str = os.getenv("DATA_API_URL", "http://localhost:8001")
+    ```
+
+    test dans le navigateur ` http://127.0.0.1:8001/health `
+    ou 
+    ```
+    # 1. Santé
+    curl http://127.0.0.1:8001/health
+
+    # 2. Recherche textuelle
+    curl "http://127.0.0.1:8001/films/search?q=exorcist&limit=2"
+
+    # 3. Film par ID (remplace 1 par un vrai id de ta base)
+    curl http://127.0.0.1:8001/films/3937
+    ```
