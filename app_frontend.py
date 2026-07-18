@@ -17,14 +17,12 @@ import httpx  # Client HTTP moderne, remplace ``requests`` et ``urllib``
 
 import streamlit as st  # Framework de l'interface web
 
-
 # --- Configuration centralisée de la connexion au backend --------------------
-API_BASE_URL: str = "http://localhost:8000"  # Racine de l'API FastAPI
-API_TIMEOUT: float = 120.0  # Durée max d'attente (le RAG peut être lent)
-
-# Phase 5.3 (préparation) : clé API en dur pour l'instant.
-# Cette valeur sera externalisée (variables d'environnement) en Phase 7.
-API_KEY: str = "placeholder-horragor-key"
+# On importe la source unique de vérité pour éviter tout hardcodage.
+# L'utilisateur peut surcharger ces valeurs via le fichier .env :
+#   API_BASE_URL=http://localhost:8000
+#   API_TIMEOUT=120
+from src.config import API_BASE_URL, API_TIMEOUT
 
 def init_session_state() -> None:
     """
@@ -48,10 +46,7 @@ def call_chat_api(question: str, thread_id: str) -> dict:
     Envoie une question au endpoint ``POST /chat`` du backend.
     """
     url: str = f"{API_BASE_URL}/chat"
-    headers = {
-        "Content-Type": "application/json",
-        "X-API-Key": API_KEY,
-    }
+    headers = {"Content-Type": "application/json"}
     payload: dict = {
         "message": question,
         "thread_id": thread_id,

@@ -36,6 +36,7 @@ import psycopg2.extensions
 from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings
 from loguru import logger
+from src.config import OLLAMA_EMBEDDING_MODEL, OLLAMA_BASE_URL
 
 # -----------------------------------------------------------------------------
 # Constantes
@@ -45,12 +46,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 OUTPUT_DIR = PROJECT_ROOT / "data" / "faiss_index"
 """Répertoire de destination des artefacts FAISS et métadonnées."""
-
-OLLAMA_BASE_URL = "http://localhost:11434"
-"""URL du serveur Ollama local."""
-
-OLLAMA_MODEL = "nomic-embed-text"
-"""Nom exact du modèle d'embedding servi par Ollama."""
 
 EMBEDDING_BATCH_SIZE = 50
 """Taille des lots pour la vectorisation afin de ne pas saturer la mémoire."""
@@ -221,56 +216,42 @@ def prepare_corpus(
 # -----------------------------------------------------------------------------
 def generate_embeddings(texts: list[str]) -> tuple[np.ndarray, int]:
     """
-    Produire les vecteurs denses via le modèle local ``nomic-embed-text``.
+    Produire les vecteurs denses via Ollama.
 
-    Le traitement s'effectue par lots (``EMBEDDING_BATCH_SIZE``) pour
-    éviter la saturation de la mémoire et respecter la fenêtre de
-    contexte d'Ollama. La dimension est inférée dynamiquement sur le
-    premier document.
+    Cette fonction utilise le modèle et l'endpoint définis dans
+    ``src.config`` afin de garantir la cohérence stricte avec
+    ``src.tools.rag_tool`` (même modèle et même endpoint pour
+    l'indexation et la recherche sémantique).
 
-    Args:
-        texts: Liste des blocs textuels issus de :func:`prepare_corpus`.
+    Paramètres
+    ----------
+    texts : list[str]
+        Liste des documents bruts à encoder.
 
-    Returns:
-        Tuple composé de :
-
-        1. ``embeddings`` -- matrice numpy de forme ``(N, D)`` en
-           ``float32`` où ``N`` est le nombre de documents.
-        2. ``dimension`` -- taille ``D`` de chaque vecteur (typiquement
-           768 pour nomic-embed-text).
+    Retourne
+    -------
+    tuple[np.ndarray, int]
+        * ``vectors`` : tableau NumPy float32 de forme (n_texts, dim).
+        * ``dim`` : dimension de chaque vecteur dense.
     """
-    logger.info(
-        f"Initialisation du modèle Ollama : {OLLAMA_MODEL} "
-        f"({OLLAMA_BASE_URL})..."
-    )
+    # Initialisation de l'embedder avec les paramètres centralisés.
+    # Cela évite toute divergence entre la construction de l'index
+    # et son utilisation en runtime.
     embedder = OllamaEmbeddings(
-        model=OLLAMA_MODEL,
+        model=OLLAMA_EMBEDDING_MODEL,
         base_url=OLLAMA_BASE_URL,
     )
 
-    # Extraction de la dimension réelle sur le premier document
-    sample_embedding = embedder.embed_query(texts[0])
-    dimension = len(sample_embedding)
-    logger.info(f"Dimension des embeddings confirmée : {dimension}")
-
-    # Génération par lots progressifs
     logger.info(
-        f"Génération des embeddings par lots de {EMBEDDING_BATCH_SIZE}..."
+        f"Génération de {len(texts)} embeddings avec le modèle "
+        f"'{OLLAMA_EMBEDDING_MODEL}' sur l'endpoint '{OLLAMA_BASE_URL}'"
     )
-    embeddings: list[list[float]] = []
 
-    for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-        batch = texts[i : i + EMBEDDING_BATCH_SIZE]
-        batch_vectors = embedder.embed_documents(batch)
-        embeddings.extend(batch_vectors)
-        logger.debug(
-            f"Lot {i // EMBEDDING_BATCH_SIZE + 1} traité "
-            f"({len(batch)} document(s))"
-        )
+    # Appel bloquant à Ollama (embedding batché côté LC).
+    vectors = embedder.embed_documents(texts)
+    embedding_dim = len(vectors[0])
 
-    embeddings_np = np.array(embeddings, dtype=np.float32)
-    logger.info("Tous les embeddings sont générés et formatés en float32.")
-    return embeddings_np, dimension
+    return np.array(vectors, dtype=np.float32), embedding_dim
 
 
 # -----------------------------------------------------------------------------

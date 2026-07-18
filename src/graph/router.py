@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
+from src.config import FAISS_COSINE_THRESHOLD
+
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -33,10 +35,8 @@ logger = logging.getLogger(__name__)
 #   - Requêtes vagues      : best_score ∈ [0.55, 0.71]
 #   - Requêtes hors sujet  : best_score ∈ [0.12, 0.45]
 #
-# Seuil retenu pour éviter les faux positifs sans être trop restrictif :
-FAISS_COSINE_THRESHOLD: float = 0.60
-"""Cosine similarity minimale du meilleur hit FAISS pour considérer le
-résultat vectoriel comme sémantiquement pertinent."""
+# Seuil retenu pour éviter les faux positifs sans être trop restrictif.
+# Valeur définie dans src.config (0.55 par défaut, surchargeable via .env)
 
 MIN_STRUCTURAL_MATCHES: int = 1
 """Nombre minimal d'œuvres retournées par la base structurée pour
@@ -59,7 +59,6 @@ def _extract_best_faiss_score(rag_results: dict[str, Any]) -> float:
         return 0.0
     return max((hit.get("score", 0.0) for hit in hits), default=0.0)
 
-
 def _structured_has_matches(rag_results: dict[str, Any]) -> bool:
     """Vérifie que la base structurée a renvoyé au moins un film."""
     struct_block = rag_results.get("structured") or {}
@@ -72,12 +71,10 @@ def _structured_has_matches(rag_results: dict[str, Any]) -> bool:
     )
     return len(movies) >= MIN_STRUCTURAL_MATCHES
 
-
 def _faiss_is_relevant(rag_results: dict[str, Any]) -> bool:
     """Évalue la qualité du résultat vectoriel."""
     score = _extract_best_faiss_score(rag_results)
     return score >= FAISS_COSINE_THRESHOLD
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Fonction de routage (appelée par l'edge conditionnelle LangGraph)

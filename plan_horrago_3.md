@@ -12,6 +12,9 @@ Adapte ton dépôt pour coller à cette arborescence :
 horragor-project/
 ├── data/
 │   └── faiss_index/          # Index vectoriel généré en Phase 1
+│   │   ├── horror_index.faiss
+│   │   └── metadata.pkl
+│   └── build_faiss_index.py   
 ├── app_frontend.py           # UI Streamlit (Phase 5)
 ├── .streamlit/
 │   └── config.toml           # Thème "Horror" (Phase 0.4)
