@@ -17,15 +17,16 @@ mécanisme de singleton (module-level) afin d'éviter les I/O répétées.
 
 from __future__ import annotations
 
+from src.config import (
+    DATABASE_URL,
+    FAISS_INDEX_DIR,
+    FAISS_TOP_K,
+    OLLAMA_BASE_URL,
+    OLLAMA_EMBEDDING_MODEL,
+)
 
-import os
 import pickle
-from pathlib import Path
 from typing import Any
-from rapidfuzz import process, fuzz
-
-from dotenv import load_dotenv
-
 
 import faiss
 import numpy as np
@@ -33,36 +34,10 @@ import psycopg2
 import psycopg2.extensions
 from langchain_ollama import OllamaEmbeddings
 from loguru import logger
+from rapidfuzz import process, fuzz
 
 
-# ── Définition de la racine du projet ──────────────────────────────
-# __file__ = src/tools/rag_tool.py  →  remonte 3 niveaux = racine
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-
-# Charge le .env situé à la racine (avant toute utilisation d'os.environ)
-load_dotenv(PROJECT_ROOT / ".env")
-
-# -----------------------------------------------------------------------------
-# Constantes de chemins et de configuration
-# -----------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-"""Racine du projet (trois niveaux au-dessus de src/tools/)."""
-
-FAISS_INDEX_PATH = PROJECT_ROOT / "data" / "faiss_index" / "horror_index.faiss"
-"""Chemin vers l'index vectoriel généré par ``build_faiss_index.py``."""
-
-FAISS_META_PATH = PROJECT_ROOT / "data" / "faiss_index" / "metadata.pkl"
-"""Chemin vers le Pickle contenant la liste des métadonnées alignées."""
-
-OLLAMA_BASE_URL = "http://localhost:11434"
-"""URL du serveur Ollama local."""
-
-OLLAMA_MODEL = "nomic-embed-text"
-"""Nom du modèle d'embedding identique à celui utilisé lors de la construction."""
-
-# -----------------------------------------------------------------------------
-# Singletons module-level
-# -----------------------------------------------------------------------------
+# ── Singletons module-level ────────────────────────────────────────────
 _faiss_index: faiss.Index | None = None
 """Instance FAISS en mémoire (IndexFlatIP)."""
 
@@ -94,30 +69,34 @@ def _load_faiss_resources() -> tuple[faiss.Index, list[dict[str, Any]], OllamaEm
         logger.debug("Ressources FAISS déjà en mémoire (cache hit).")
         return _faiss_index, _faiss_metadata, _ollama_embedder
 
+    # Construction des chemins depuis la configuration centralisée
+    chemin_index = FAISS_INDEX_DIR / "horror_index.faiss"
+    chemin_meta = FAISS_INDEX_DIR / "metadata.pkl"
+
     # 1. Vérification des artefacts sur disque
-    if not FAISS_INDEX_PATH.exists():
-        logger.error(f"Index FAISS introuvable : {FAISS_INDEX_PATH}")
-        raise FileNotFoundError(f"Index FAISS manquant : {FAISS_INDEX_PATH}")
-    if not FAISS_META_PATH.exists():
-        logger.error(f"Métadonnées introuvables : {FAISS_META_PATH}")
-        raise FileNotFoundError(f"Métadonnées manquantes : {FAISS_META_PATH}")
+    if not chemin_index.exists():
+        logger.error(f"Index FAISS introuvable : {chemin_index}")
+        raise FileNotFoundError(f"Index FAISS manquant : {chemin_index}")
+    if not chemin_meta.exists():
+        logger.error(f"Métadonnées introuvables : {chemin_meta}")
+        raise FileNotFoundError(f"Métadonnées manquantes : {chemin_meta}")
 
     # 2. Chargement binaire FAISS
-    logger.info(f"Chargement de l'index FAISS : {FAISS_INDEX_PATH}")
-    _faiss_index = faiss.read_index(str(FAISS_INDEX_PATH))
+    logger.info(f"Chargement de l'index FAISS : {chemin_index}")
+    _faiss_index = faiss.read_index(str(chemin_index))
 
     # 3. Désérialisation des métadonnées
-    logger.info(f"Chargement des métadonnées : {FAISS_META_PATH}")
-    with open(FAISS_META_PATH, "rb") as fh:
+    logger.info(f"Chargement des métadonnées : {chemin_meta}")
+    with open(chemin_meta, "rb") as fh:
         _faiss_metadata = pickle.load(fh)
 
     # 4. Initialisation de l'embedder (strictement le même modèle que build)
     logger.info(
-        f"Initialisation Ollama pour les requêtes : {OLLAMA_MODEL} "
+        f"Initialisation Ollama pour les requêtes : {OLLAMA_EMBEDDING_MODEL} "
         f"({OLLAMA_BASE_URL})"
     )
     _ollama_embedder = OllamaEmbeddings(
-        model=OLLAMA_MODEL,
+        model=OLLAMA_EMBEDDING_MODEL,
         base_url=OLLAMA_BASE_URL,
     )
 
@@ -127,9 +106,10 @@ def _load_faiss_resources() -> tuple[faiss.Index, list[dict[str, Any]], OllamaEm
     )
     return _faiss_index, _faiss_metadata, _ollama_embedder
 
+
 def search_local_horror_lore(
     query: str,
-    top_k: int = 3,
+    top_k: int = FAISS_TOP_K,
 ) -> list[dict[str, Any]]:
     """
     Recherche sémantique dans le corpus horreur indexé localement (FAISS).
@@ -177,22 +157,15 @@ def search_local_horror_lore(
     # 3. Recherche des k plus proches voisins
     # ------------------------------------------------------------------
     distances, indices = index.search(query_np, top_k)
-    # distances[0]  : scores (float32), shape == (top_k,)
-    # indices[0]    : positions dans l'index, shape == (top_k,)
 
     results: list[dict[str, Any]] = []
     for dist, idx in zip(distances[0], indices[0]):
-        # Sécurité : idx == -1 si l'index ne trouve rien (ne devrait pas
-        # arriver ici car l'index contient 7391 vecteurs et top_k <= 7391).
         if idx < 0 or idx >= len(metas):
             logger.warning(f"Indice FAISS invalide ignoré : {idx}")
             continue
 
         meta = metas[idx]
 
-        # Reconstruction minimale du chunk depuis les métadonnées disponibles.
-        # Si l'index avait stocké le texte intégral sous la clé "text",
-        # on pourrait l'injecter ici directement.
         chunk_parts = [f"Titre: {meta.get('titre', 'Inconnu')}"]
         if meta.get("annee_sortie"):
             chunk_parts.append(f"Année: {meta['annee_sortie']}")
@@ -218,52 +191,29 @@ def search_local_horror_lore(
     )
     return results
 
+
 def _get_db_connection() -> psycopg2.extensions.connection:
     """
-    Établit une connexion PostgreSQL vers Supabase.
+    Établit une connexion PostgreSQL via la configuration centralisée.
 
-    Ordre de priorité :
-    1. ``DATABASE_URL`` (chaîne complète postgresql://…) ;
-    2. Variables séparées ``SUPABASE_HOST``, ``SUPABASE_DB``,
-       ``SUPABASE_USER``, ``SUPABASE_PASSWORD``.
+    Raises:
+        RuntimeError: Si ``DATABASE_URL`` n'est pas définie.
+        psycopg2.Error: Si la connexion échoue.
     """
-    import os
-
-    # ── Priorité 1 : chaîne complète (celle de ton .env) ──────────
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url:
-        try:
-            conn = psycopg2.connect(database_url)
-            logger.debug("Connexion PostgreSQL établie via DATABASE_URL.")
-            return conn
-        except Exception as exc:  # pragma: no cover
-            logger.warning(
-                f"DATABASE_URL présente mais connexion échouée : {exc}"
-            )
-
-    # ── Priorité 2 : variables séparées ────────────────────────────
-    required = [
-        "SUPABASE_HOST",
-        "SUPABASE_DB",
-        "SUPABASE_USER",
-        "SUPABASE_PASSWORD",
-    ]
-    missing = [v for v in required if not os.environ.get(v)]
-    if missing:
+    if not DATABASE_URL:
         raise RuntimeError(
-            f"Variables d'environnement manquantes : {missing}. "
-            "Définissez DATABASE_URL ou les 4 variables : "
-            "SUPABASE_HOST, SUPABASE_DB, SUPABASE_USER, SUPABASE_PASSWORD."
+            "DATABASE_URL n'est pas configurée. "
+            "Vérifiez votre fichier .env ou src/config.py."
         )
 
-    conn = psycopg2.connect(
-        host=os.environ["SUPABASE_HOST"],
-        database=os.environ["SUPABASE_DB"],
-        user=os.environ["SUPABASE_USER"],
-        password=os.environ["SUPABASE_PASSWORD"],
-        port=os.environ.get("SUPABASE_PORT", "5432"),
-    )
-    return conn
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        logger.debug("Connexion PostgreSQL établie via DATABASE_URL.")
+        return conn
+    except Exception as exc:
+        logger.error(f"Échec connexion PostgreSQL : {exc}")
+        raise
+
 
 def query_movie_metadata(
     titre: str | None = None,
@@ -363,41 +313,35 @@ def query_movie_metadata(
             "casting": casting_str,
         })
 
-# ========== DÉBUT : ROBUSTESSE DONNÉES (sans toucher Supabase) ==========
-
-    # 1. Dédoublonnage : on garde le premier (id_film le plus petit) par (titre, année)
+    # ========== DÉBUT : ROBUSTESSE DONNÉES (sans toucher Supabase) ==========
     seen = set()
     unique_results = []
     for film in results:
-        # Clé de dédoublonnage : titre normalisé + année
         titre_clean = str(film.get("titre") or "").strip().lower()
         annee = film.get("annee_sortie")
         key = (titre_clean, annee)
-        
+
         if key not in seen:
             seen.add(key)
             unique_results.append(film)
-    
+
     results = unique_results
 
-    # 2. Masquage des réalisateurs "Inconnu" ou manquants
     for film in results:
         real = film.get("realisateur")
         if not real or str(real).strip().lower() == "inconnu":
             film["realisateur"] = "Non spécifié"
-        
-        # Sécurité supplémentaire sur les champs listes/texte
+
         if not film.get("genres"):
             film["genres"] = []
         if not film.get("casting"):
             film["casting"] = "Non disponible"
 
-    # 3. Respect de top_k après dédoublonnage
     results = results[:top_k]
-
     # ========== FIN : ROBUSTESSE DONNÉES ==========
 
     return results
+
 
 def find_similar_horror_movies(id_film: int, k: int = 5) -> list[dict[str, Any]]:
     """
@@ -426,7 +370,7 @@ def find_similar_horror_movies(id_film: int, k: int = 5) -> list[dict[str, Any]]
     conn = _get_db_connection()
     cur = conn.cursor()
 
-    # ── Vérification préalable : le film de référence a-t-il un embedding ? ──
+    # Vérification préalable
     cur.execute(
         "SELECT embedding IS NOT NULL FROM film WHERE id_film = %s",
         (id_film,),
@@ -444,7 +388,6 @@ def find_similar_horror_movies(id_film: int, k: int = 5) -> list[dict[str, Any]]
             "Avez-vous lancé le script de génération / ingestion des embeddings (étape 0.3) ?"
         )
 
-    # ── Requête pgvector paramétrée ────────────────────────────────────────
     sql = """
         SELECT
             f.id_film,
@@ -532,8 +475,9 @@ def find_similar_horror_movies(id_film: int, k: int = 5) -> list[dict[str, Any]]
     logger.info(
         f"pgvector similarity : {len(results)} voisin(s) trouvé(s) pour id_film={id_film}"
     )
-    
+
     return results
+
 
 def fuzzy_find_film(raw_title: str, score_cutoff: float = 60.0) -> dict | None:
     """
@@ -544,17 +488,7 @@ def fuzzy_find_film(raw_title: str, score_cutoff: float = 60.0) -> dict | None:
     cur = conn.cursor()
 
     try:
-        # Optionnel : pré-filtre qui ne garde que les films ayant un mot en commun
-        # (désactivé ici car rapidfuzz est déjà très rapide sur <50k lignes,
-        # mais tu peux le décommenter si ta base grossit)
-        #
-        # words = [w for w in raw_title.lower().split() if len(w) > 2]
-        # if words:
-        #     cond = " OR ".join(["titre ILIKE %s"] * len(words))
-        #     cur.execute(f"SELECT id_film, titre FROM film WHERE titre IS NOT NULL AND ({cond})", [f"%{w}%" for w in words])
-        # else:
         cur.execute("SELECT id_film, titre FROM film WHERE titre IS NOT NULL")
-
         rows = cur.fetchall()
     finally:
         cur.close()
@@ -565,12 +499,11 @@ def fuzzy_find_film(raw_title: str, score_cutoff: float = 60.0) -> dict | None:
 
     choices = {titre: id_f for id_f, titre in rows}
 
-    # token_sort_ratio : ignore l'ordre des mots, compare l'ensemble des tokens
     result = process.extractOne(
         raw_title,
         choices.keys(),
         scorer=fuzz.token_sort_ratio,
-        processor=str.lower,  # normalise la casse avant comparaison
+        processor=str.lower,
         score_cutoff=score_cutoff,
     )
 
@@ -583,7 +516,8 @@ def fuzzy_find_film(raw_title: str, score_cutoff: float = 60.0) -> dict | None:
         "titre": best_title,
         "score": round(float(score), 2),
     }
-    
+
+
 def resolve_film(raw_query: str, score_cutoff: float = 60.0) -> int:
     match = fuzzy_find_film(raw_query, score_cutoff=score_cutoff)
     if match is None:

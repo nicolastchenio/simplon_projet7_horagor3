@@ -1155,3 +1155,36 @@ headers = {
 ```
 
 Le reste de la fonction reste inchangé. Le API_KEY est déjà défini en haut du fichier : ` API_KEY: str = "placeholder-horragor-key" `
+
+# src/config.py #
+1) Crée le fichier  src/config.py
+2) modification de src/tools/rag_tool.py  
+   Test rapide à faire après mise à jour :
+   ```
+   # 1. Vérifier que le module charge sans erreur
+    python -c "from src.tools.rag_tool import search_local_horror_lore; print('OK rag_tool')"
+
+    # 2. Vérifier que config expose les bonnes valeurs
+    python -c "from src.config import OLLAMA_CHAT_MODEL; print(OLLAMA_CHAT_MODEL)"
+    # Attendu : qwen2.5:7b (ou ce que tu as mis dans ton .env)
+    ```
+3) modifier src/tools/scraper_tool.py
+   test a faire :
+   ` python -c "from src.tools.scraper_tool import REQUEST_TIMEOUT; print(REQUEST_TIMEOUT)" `
+4) modifier src/graph/router.py  
+   - Et ajout de ` FAISS_COSINE_THRESHOLD=0.60 ` dans mon .env
+        Dans src/config.py, tu as déjà une valeur par défaut : ` FAISS_COSINE_THRESHOLD: float = float(os.getenv("FAISS_COSINE_THRESHOLD", "0.55")) `  
+        Cela signifie :
+        - Pas de variable dans .env  → (config.py prend le relais)→  0.55
+        - FAISS_COSINE_THRESHOLD=0.60 dans .env  →  .env prime  →  0.60  
+        On a donc les deux :
+        - .env = la surcouche locale pour toi, maintenant, sur cette machine.
+        - config.py = le fallback universel si quelqu'un oublie de renseigner le .env.
+  
+        Si on met 0.60 en dur dans config.py ou router.py, on doit modifier le code source et redémarrer l'IDE à chaque fois que l'on change d'environnement. Avec .env, tu changes une valeur, tu relances, c'est testé — sans toucher au code.
+
+   - test a faire : ` python -c "from src.graph.router import FAISS_COSINE_THRESHOLD; print(FAISS_COSINE_THRESHOLD)" `
+   
+5) modifier src/graph/nodes.py
+   test a faire : ` python -c "from src.graph.nodes import _get_narrator_llm; llm = _get_narrator_llm(); print(llm.model, llm.base_url)" `
+6) modifier data/build_faiss_index.py

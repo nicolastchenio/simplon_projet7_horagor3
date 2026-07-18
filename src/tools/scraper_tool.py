@@ -8,7 +8,6 @@ par le LLM.
 
 from __future__ import annotations
 
-import os
 import re
 import urllib.parse
 from typing import Final
@@ -17,15 +16,18 @@ import requests
 from bs4 import BeautifulSoup
 from loguru import logger
 
-# ── Constantes ──────────────────────────────────────────────────────────
-REQUEST_TIMEOUT: Final[int] = int(os.getenv("REQUEST_TIMEOUT", "10"))
+from src.config import REQUEST_TIMEOUT, WIKIPEDIA_LANG
+
+# ── Constantes locales (non centralisables car métier fixe) ─────────────
 HEADERS: Final[dict[str, str]] = {
     "User-Agent": (
         "HorRAGorBot/0.1 (Projet Simplon; contact@horragor.local)"
     ),
     "Accept-Language": "fr-FR,fr;q=0.9",
 }
-WIKI_API_URL: Final[str] = "https://fr.wikipedia.org/w/api.php"
+WIKI_API_URL: Final[str] = f"https://{WIKIPEDIA_LANG}.wikipedia.org/w/api.php"
+"""URL de l'API MediaWiki, construite dynamiquement depuis la langue
+configurée dans ``src.config`` (défaut : fr)."""
 
 
 # ── Fonctions internes (API MediaWiki) ─────────────────────────────────

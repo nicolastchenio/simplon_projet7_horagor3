@@ -11,8 +11,11 @@ que le moteur fusionnera dans l'``AgentState`` global.
     étapes 3.3 et 3.4.
 """
 
+from __future__ import annotations
+
 import re
 
+from src.config import OLLAMA_CHAT_MODEL, OLLAMA_BASE_URL
 from src.models.state import AgentState
 from src.tools.rag_tool import search_local_horror_lore
 from src.tools.rag_tool import query_movie_metadata  # outil structuré défini en Phase 1
@@ -304,9 +307,9 @@ def _get_narrator_llm() -> ChatOllama:
     global _narrator_llm
     if _narrator_llm is None:
         _narrator_llm = ChatOllama(
-            model="qwen2.5:7b",
+            model=OLLAMA_CHAT_MODEL,
             temperature=0.7,
-            # base_url="http://localhost:11434"  # décommente si Ollama n'est pas sur le port par défaut
+            base_url=OLLAMA_BASE_URL,
         )
     return _narrator_llm
 
