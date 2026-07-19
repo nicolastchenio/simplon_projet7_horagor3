@@ -1302,3 +1302,276 @@ print(find_similar_horror_movies(3937, k=2))
 # Test C : fuzzy → resolve
 uv run python -c "from src.tools.rag_tool import fuzzy_find_film, resolve_film; print(fuzzy_find_film('conjuring')); print(resolve_film('conjuring'))"
 ```
+
+# Phase 7 : Conteneurisation, Auth & Réseau #
+## 7.1 Docker & Docker Compose
+L'objectif est de figer l'application dans 3 images isolées qui communiquent uniquement à l'intérieur d'un réseau privé Docker (horragor-net). En configuration sécurisée, seul Streamlit expose un port vers l'hôte (8501). Pour préserver cette contrainte tout en permettant le débogage, l'architecture repose sur deux fichiers d'orchestration : une base stricte et un override de développement.
+
+### Principe de l'architecture réseau
+
+Dans Docker, chaque conteneur possède son propre espace réseau et ne connaît pas les ports de l'hôte. Lorsqu'ils partagent un même réseau bridge (horragor-net), ils peuvent se joindre par leur nom de service défini dans le compose :
+- intelligence-api appelle http://data-api:8001 (Data API)
+- frontend appelle http://intelligence-api:8000 (Intelligence API)
+- Le navigateur de l'utilisateur, lui, ne voit que http://localhost:8501
+
+Les identifiants Supabase restent ainsi confinés dans le conteneur data-api, et le moteur LLM (Ollama) reste accessible uniquement par intelligence-api via host.docker.internal.
+
+### Construction des images
+Trois images sont construites à la demande grâce aux Dockerfile placés dans le dossier docker/ :
+- docker/data_api.Dockerfile : image légère basée sur python:3.12-slim. Seuls les fichiers strictement nécessaires sont copiés : src/__init__.py et src/config.py (la configuration Supabase), ainsi que le code spécifique du Data API. Le graphe LangGraph et les outils de l'Intelligence ne sont pas embarqués ici.
+- docker/intelligence_api.Dockerfile : image complète embarquant libgomp1 (requis par faiss-cpu), l'intégralité du package src/, l'index FAISS sous data/faiss_index et le fichier pyproject.toml. Les variables OLLAMA_BASE_URL=http://host.docker.internal:11434 et DATA_API_URL=http://data-api:8001 lui permettent de joindre Ollama sur l'hôte Windows et le Data API sur le réseau interne.
+- docker/frontend.Dockerfile : image Streamlit avec httpx et PYTHONPATH=/app. Elle copie l'ensemble du dossier src/ (nécessaire pour l'import src.config), le script app_frontend.py et le dossier .streamlit/.
+
+### Orchestration : deux configurations pour deux usages
+
+Pour respecter l'exigence de sécurité (seul le frontend exposé) sans bloquer le développement, on utilise le mécanisme de fusion de fichiers de Docker Compose.
+
+#### Fichier de base : docker-compose.yml
+Ce fichier décrit la configuration cible et sécurisée. Il déclare les 3 services avec la directive build pour reconstruire automatiquement les images si elles sont absentes, surcharge les variables d'environnement pour utiliser les noms de service internes (ex. API_BASE_URL=http://intelligence-api:8000), et n'expose aucun port pour les deux APIs.
+
+#### Fichier d'override : docker-compose.dev.yml
+Ce second fichier, placé à côté du premier, contient uniquement les différences nécessaires au mode développement. Il ajoute temporairement les sections ports: pour data-api (8001:8001) et intelligence-api (8000:8000). Docker Compose fusionne les deux fichiers à l'exécution : la base définit le réseau, les variables et les dépendances, tandis que l'override injecte les ports de debug sans modifier l'image de production.
+
+| Mode | Commande | Ports exposés | Usage |
+|------|----------|---------------|-------|
+| **Production / Sujet** | `docker compose up -d` | Seul `8501` (Streamlit) | Respect strict du périmètre de sécurité. Les APIs sont invisibles depuis l'hôte mais communiquent en interne. |
+| **Développement** | `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d` | `8501`, `8000`, `8001` | Swagger (`/docs`) et tests directs sur les APIs accessibles depuis le navigateur/Postman. |
+
+1) Dockerfile du data_api
+- creer "docker/data_api.Dockerfile"
+  
+    | Instruction | Pourquoi on fait ça |
+    |-------------|---------------------|
+    | `python:3.12-slim` | Image légère (~60 Mo) suffisante pour FastAPI + psycopg. Pas besoin de la version "full" ou d'Alpine (qui complique les builds Python). |
+    | `PYTHONUNBUFFERED=1` | Force Python à afficher les logs immédiatement. Indispensable pour voir les erreurs dans `docker logs`. |
+    | `uv pip install --system` | Dans un conteneur, on n'a pas besoin de virtualenv. On installe directement dans l'environnement système Python. |
+    | `COPY pyproject.toml` avant le code | **Cache Docker magique** : si tu modifies juste un `.py`, Docker réutilise la layer des dépendances déjà installées. Le build est instantané. |
+    | `COPY src/config.py` seul | Respect du principe : on n'embarque pas tout `src/` (pas besoin du graphe LangGraph ici). Juste la config. |
+    | `EXPOSE 8001` | Documente le port. Le `docker-compose.yml` l'utilisera plus tard pour le mapping. |
+    | **`python:3.12-slim`** | Ton `pyproject.toml` exige `>=3.12`. On s'aligne exactement. |
+    | **`RUN mkdir -p src`** | Prépare le dossier avant de copier les fichiers dedans. |
+    | **`COPY src/__init__.py src/`** | Nécessaire pour que Python traite `src` comme un package. Sans ça, `from src.config import ...` pourrait échouer selon le contexte. |
+
+- Créer ".dockerignore" à la racine de ton projet (au même niveau que .env)
+- Commande pour tester le build :
+  - Depuis la racine de ton projet : ` docker build -f docker\data_api.Dockerfile -t horragor-data-api:1.0 . `
+  - Si on est en train de coder et que de rebuilds souvent, ajouter --no-cache quand on modifie les dépendances : `docker build --no-cache -f docker\data_api.Dockerfile -t horragor-data-api:1.0 . `
+  - Lancer le conteneur (méthode rapide avec ton .env), puisque ton .env est déjà à la racine, Docker peut le lire directement et injecter les variables dans le conteneur : ` docker run --rm -p 8001:8001 --env-file .env horragor-data-api:1.0 `
+  - Vérifie ensuite : http://localhost:8001/docs doit afficher ta documentation Swagger.
+  
+2) Dockerfile pour ton API Intelligence (FastAPI + LangGraph + FAISS)  
+Il est plus complet que celui du data-api car il embarque tout le package src/, l'index FAISS, et la librairie système libgomp1 requise par faiss-cpu.
+
+   -  Créer le fichier "docker\intelligence_api.Dockerfile"
+   -  creer un ".env.docker" à la racine:
+   -  build  => ` docker build -f docker\intelligence_api.Dockerfile -t horragor-intelligence-api:1.0 . `
+   -  lancer => ` docker run --rm --env-file .env.docker -p 8000:8000 horragor-intelligence-api:1.0 `  
+   Ouvre ton navigateur sur http://localhost:8000/docs pour vérifier que l'API Intelligence est en ligne.
+   - Si on veut tester l'index FAISS dans le conteneur, Pour s'assurer que l'index est bien là, tu peux lancer un shell dans l'image : ` docker run -it --rm --env-file .env horragor-intelligence-api:1.0 sh `  
+   Puis dans le shell => ` ls -la /app/data/faiss_index `
+   On doit voir les fichiers index.faiss, metadata.json, etc.
+
+3) Dockerfile pour le frontend Streamlit
+Le frontend Streamlit est le plus simple des trois conteneurs : il n'a besoin que de Streamlit + d'un client HTTP (requests) pour discuter avec l'API Intelligence.
+   - Créer le fichier docker/frontend.Dockerfile
+
+        | Élément | Pourquoi |
+        |---|---|
+        | **`httpx`** remplace `requests` | le code utilise `import httpx`, pas `requests`. |
+        | **`PYTHONPATH=/app`** | Obligatoire car tu fais des imports absolus (`from src.config import ...`). Sans ça, Python ne trouve pas le package `src`. |
+        | **`COPY src/ src/`** | le frontend dépend de `src/config.py`. On copie donc tout le dossier `src/`. |
+
+    - build => ` docker build -t horragor-frontend -f docker/frontend.Dockerfile . `
+    - lancer => ` docker run -d --name horragor-front-test -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 horragor-frontend `
+  
+        | Option | Signification |
+        |---|---|
+        | `-d` | Lance en arrière-plan (tu récupères la main dans le terminal) |
+        | `--name horragor-front-test` | Nom du conteneur pour plus facilement le gérer |
+        | `-p 8501:8501` | Redirige le port 8501 du conteneur vers ton PC (`localhost:8501`) |
+        | `-e API_BASE_URL=http://host.docker.internal:8000` | **Essentiel** : dit au frontend d'appeler ton API qui tourne sur Windows, pas dans le conteneur |
+        | `horragor-frontend` | Le nom de l'image qu'on vient de builder |
+
+   - ouvrir le navigateur => http://localhost:8501
+
+## docker-compose.yml ##
+### 1. Placement des fichiers
+Placez les deux fichiers docker-compose.yml (base) et docker-compose.dev.yml (override) dans le même répertoire que vos fichiers d'environnement :
+📁 votre-projet/
+├── docker-compose.yml           ← configuration "Sujet" / Production
+├── docker-compose.dev.yml       ← override développement (ports API temporaires)
+├── .env                         ← variables Data API
+├── .env.docker                  ← variables Intelligence API
+├── docker/                      ← Dockerfiles
+│   ├── data_api.Dockerfile
+│   ├── intelligence_api.Dockerfile
+│   └── frontend.Dockerfile
+├── data_api/                    ← code source Data API
+
+
+### 2. Principe de sécurité du réseau
+Conformément aux exigences du projet, l'architecture réseau suit cette règle stricte :
+
+| Service | Port interne | Port publié vers l'hôte | Accessible par... |
+|---------|--------------|-------------------------|-------------------|
+| `data-api` | `8001` | ❌ **Aucun** | Uniquement `intelligence-api` via le réseau Docker |
+| `intelligence-api` | `8000` | ❌ **Aucun** | Uniquement `frontend` via le réseau Docker |
+| `frontend` | `8501` | ✅ `8501:8501` | Le navigateur de l'utilisateur |
+
+
+
+Les conteneurs communiquent entre eux par leur nom de service sur le réseau interne horragor-net :
+- Le frontend appelle http://intelligence-api:8000
+- L'intelligence appelle http://data-api:8001
+
+Le PC hôte (Windows) ne voit que Streamlit. Les identifiants Supabase et le moteur LLM restent enfermés dans le périmètre Docker.
+
+### 3. Fichier docker-compose.yml (base — mode Production)
+Ce fichier définit la configuration sujet. Aucun port critique n'est exposé.
+
+### 4. Fichier docker-compose.dev.yml (override — mode Développement)
+Ce fichier ne contient que les différences par rapport au précédent. Docker Compose va les fusionner. Il sert uniquement à ouvrir temporairement les ports des APIs pour consulter la documentation Swagger (/docs) et tester avec Postman.
+Créer un fichier nommé exactement docker-compose.dev.yml à côté du premier
+
+Pourquoi ça fonctionne ?Docker Compose lit d'abord le fichier de base, puis applique le fichier d'override. Le docker-compose.dev.yml ajoute les sections ports: manquantes sans écraser le reste de la configuration (réseau, variables, dépendances, etc.).
+
+### 5. Lancer les services
+#### Mode "Sujet" / Production (sécurisé, seul Streamlit est visible)
+Depuis le répertoire contenant les fichiers .yml :
+```
+docker compose down
+docker compose up -d --build
+```
+Vérification :
+```
+docker ps
+```
+Résultat attendu en production :
+```
+CONTAINER ID   IMAGE                         PORTS                    NAMES
+xxxxxxxxxxxx   horragor-data-api:1.0          <aucun>                  horragor-data
+xxxxxxxxxxxx   horragor-intelligence-api:1.0  <aucun>                  horragor-ia
+xxxxxxxxxxxx   horragor-frontend:latest       0.0.0.0:8501->8501/tcp   horragor-front
+```
+
+| Service | URL | État |
+|---|---|---|
+| Frontend Streamlit | http://localhost:8501 | ✅ Accessible |
+| Data API (Swagger) | http://localhost:8001/docs | ❌ Inaccessible (normal, c'est le but) |
+| Intelligence API (Swagger) | http://localhost:8000/docs | ❌ Inaccessible |
+
+Les 3 conteneurs communiquent néanmoins parfaitement entre eux via le réseau interne horragor-net.
+
+#### Mode Développement (accès temporaire aux APIs)
+Pour déboguer ou consulter la documentation Swagger des APIs :
+```
+docker compose down
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+Vérification :
+```
+docker ps
+```
+Résultat attendu en développement :
+```
+CONTAINER ID   IMAGE                         PORTS                    NAMES
+xxxxxxxxxxxx   horragor-data-api:1.0          0.0.0.0:8001->8001/tcp   horragor-data
+xxxxxxxxxxxx   horragor-intelligence-api:1.0  0.0.0.0:8000->8000/tcp   horragor-ia
+xxxxxxxxxxxx   horragor-frontend:latest       0.0.0.0:8501->8501/tcp   horragor-front
+```
+
+| Service | URL | État |
+|---|---|---|
+| Frontend Streamlit | http://localhost:8501 | ✅ Accessible |
+| Intelligence API (Swagger) | http://localhost:8000/docs | ✅ Accessible |
+| Data API (Swagger) | http://localhost:8001/docs | ✅ Accessible |
+
+### 6. Suivre les logs en temps réel
+```
+# Logs de l'Intelligence API (backend LLM)
+docker compose logs -f intelligence-api
+
+# Logs de tous les services
+docker compose logs -f
+
+# Logs d'un service spécifique
+docker compose logs -f data-api
+docker compose logs -f frontend
+```
+
+### 7. Arrêter les services
+```
+docker compose down
+```
+
+Cette commande supprime les containers mais conserve le réseau horragor-net.
+Pour supprimer aussi le réseau :
+```
+docker compose down --remove-orphans
+docker network rm horragor-net
+```
+
+Pour redémarrer après un arrêt :
+```
+docker compose up -d
+```
+
+### 8. Récapitulatif des modes
+| Fichier(s) utilisé(s) | Commande | Ports ouverts | Usage |
+|-----------------------|----------|---------------|-------|
+| `docker-compose.yml` seul | `docker compose up -d` | Seul `8501` | **Production / Sujet** — respect strict du périmètre de sécurité |
+| Base + `docker-compose.dev.yml` | `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d` | `8501`, `8000`, `8001` | **Développement** — test des APIs via Swagger/Postman sans toucher au code |
+
+
+------- si besoin -----------------
+
+### 9. Configurer Ollama pour écoute sur toutes les interfaces
+
+Par défaut, Ollama écoute uniquement sur `127.0.0.1` (localhost). Les containers Docker **ne peuvent pas** y accéder. Il faut qu'il écoute sur `0.0.0.0`.
+
+#### A. Arrêter Ollama proprement
+
+Cliquez-droit sur l'icône Ollama dans la barre des tâches Windows → **Quitter**.
+
+#### B. Configurer la variable d'environnement `OLLAMA_HOST`
+
+**Option 1 — Ligne de commande (session courante) :**
+```cmd
+set OLLAMA_HOST=0.0.0.0
+```
+
+**Option 2 — Persistante (recommandée) :**
+1. `Win + R` → tapez `sysdm.cpl` → **Entrée**
+2. Onglet **Avancé** → bouton **Variables d'environnement**
+3. Section **Utilisateur** → **Nouvelle…**
+   - Nom de la variable : `OLLAMA_HOST`
+   - Valeur de la variable : `0.0.0.0`
+4. Validez sur **OK** → **OK** → **OK**
+5. Redémarrez votre PC pour que la variable soit prise en compte.
+
+#### C. Relancer Ollama
+
+Depuis le menu Démarrer Windows, lancez **Ollama** à nouveau.
+
+#### D. Vérifier avec `netstat`
+
+Ouvrez un **nouveau** terminal (CMD ou PowerShell) :
+
+```cmd
+netstat -an | findstr 11434
+```
+
+**Résultat attendu :**
+```
+TCP    0.0.0.0:11434         0.0.0.0:0              LISTENING
+```
+
+> ✅ **C'est bon !** Ollama écoute maintenant sur toutes les interfaces.
+> 
+> ❌ **Si vous voyez `127.0.0.1:11434`** → le PC n'a pas redémarré après le changement de variable d'environnement. Redémarrez le PC.
+
+#### E. Vérifier qu'Ollama répond
+
+```cmd
+curl http://localhost:11434/api/tags
+```

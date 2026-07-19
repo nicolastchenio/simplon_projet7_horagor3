@@ -1,0 +1,14 @@
+# =============================================================================
+# OVERRIDE DÉVELOPPEMENT
+# À utiliser avec : docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+# =============================================================================
+
+services:
+  data-api:
+    # Ajoute l'accès direct pour tester /docs et Postman
+    ports:
+      - "8001:8001"
+
+  intelligence-api:
+    ports:
+      - "8000:8000"

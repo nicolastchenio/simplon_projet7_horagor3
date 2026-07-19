@@ -1,0 +1,57 @@
+services:
+  # ── Service 1 : Data API (aucun port exposé) ─────────────────────────────
+  data-api:
+    build:
+      context: .
+      dockerfile: docker/data_api.Dockerfile
+    image: horragor-data-api:1.0
+    container_name: horragor-data
+    pull_policy: never
+    env_file: .env
+    # ❌ PAS DE 'ports:' ici → invisible depuis le PC hôte
+    networks:
+      - horragor-net
+    restart: unless-stopped
+
+  # ── Service 2 : Intelligence API (aucun port exposé) ─────────────────────
+  intelligence-api:
+    build:
+      context: .
+      dockerfile: docker/intelligence_api.Dockerfile
+    image: horragor-intelligence-api:1.0
+    container_name: horragor-ia
+    pull_policy: never
+    env_file: .env.docker
+    # ❌ PAS DE 'ports:' ici → invisible depuis le PC hôte
+    networks:
+      - horragor-net
+    depends_on:
+      - data-api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    restart: unless-stopped
+
+  # ── Service 3 : Frontend Streamlit (seul point d'entrée) ─────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    image: horragor-frontend:latest
+    container_name: horragor-front
+    pull_policy: never
+    # ✅ SEUL PORT EXPOSE vers l'extérieur
+    ports:
+      - "8501:8501"
+    networks:
+      - horragor-net
+    depends_on:
+      - intelligence-api
+    environment:
+      - API_BASE_URL=http://horragor-ia:8000
+    restart: unless-stopped
+
+networks:
+  horragor-net:
+    driver: bridge

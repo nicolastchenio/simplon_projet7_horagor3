@@ -97,8 +97,8 @@ htmlcov/
 # Environment Secrets
 # ==============================================
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Streamlit secrets
 .streamlit/secrets.toml
