@@ -6,10 +6,10 @@ métadonnées utilisées par l'agent conversationnel. Il s'appuie sur :
 
 * Un index FAISS local (embeddings ``nomic-embed-text``) pour la
   recherche sémantique dans les synopsis enrichis.
-* Une connexion PostgreSQL directe pour les requêtes structurées
-  (métadonnées, casting, notes).
-* L'extension ``pgvector`` pour la similarité cosinus directe en base.
-* ``rapidfuzz`` (optionnel) pour corriger les saisies approximatives.
+* Le micro-service **data-api** (HTTP) pour les requêtes structurées,
+  la similarité ``pgvector`` et le fuzzy matching.
+* ``rapidfuzz`` reste utilisé côté data-api ; ce module ne fait
+  qu'exploiter les résultats normalisés.
 
 Les ressources FAISS sont chargées une seule fois en mémoire via un
 mécanisme de singleton (module-level) afin d'éviter les I/O répétées.
@@ -17,25 +17,22 @@ mécanisme de singleton (module-level) afin d'éviter les I/O répétées.
 
 from __future__ import annotations
 
+import pickle
+from typing import Any
+
+import faiss
+import httpx
+import numpy as np
+from langchain_ollama import OllamaEmbeddings
+from loguru import logger
+
 from src.config import (
-    DATABASE_URL,
+    DATA_API_URL,
     FAISS_INDEX_DIR,
     FAISS_TOP_K,
     OLLAMA_BASE_URL,
     OLLAMA_EMBEDDING_MODEL,
 )
-
-import pickle
-from typing import Any
-
-import faiss
-import numpy as np
-import psycopg2
-import psycopg2.extensions
-from langchain_ollama import OllamaEmbeddings
-from loguru import logger
-from rapidfuzz import process, fuzz
-
 
 # ── Singletons module-level ────────────────────────────────────────────
 _faiss_index: faiss.Index | None = None
@@ -48,6 +45,10 @@ _ollama_embedder: OllamaEmbeddings | None = None
 """Client Ollama pour générer les embeddings à la volée."""
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# PARTIE 1 — FAISS LOCAL (inchangé)
+# ═══════════════════════════════════════════════════════════════════════
+
 def _load_faiss_resources() -> tuple[faiss.Index, list[dict[str, Any]], OllamaEmbeddings]:
     """
     Charge et met en cache l'index FAISS, ses métadonnées et l'embedder Ollama.
@@ -55,13 +56,17 @@ def _load_faiss_resources() -> tuple[faiss.Index, list[dict[str, Any]], OllamaEm
     Cette fonction suit le pattern *singleton* : si les ressources sont déjà
     présentes en mémoire, elle les retourne immédiatement sans nouvelle I/O.
 
-    Returns:
-        Un tuple ``(index_faiss, liste_metadata, embedder_ollama)``.
+    Returns
+    -------
+    tuple
+        ``(index_faiss, liste_metadata, embedder_ollama)``.
 
-    Raises:
-        FileNotFoundError: Si les fichiers FAISS ou Pickle sont absents.
-        RuntimeError: Si Ollama n'est pas accessible (levé plus tard par
-            ``langchain_ollama``).
+    Raises
+    ------
+    FileNotFoundError
+        Si les fichiers FAISS ou Pickle sont absents.
+    RuntimeError
+        Si Ollama n'est pas accessible (levé plus tard par ``langchain_ollama``).
     """
     global _faiss_index, _faiss_metadata, _ollama_embedder
 
@@ -69,11 +74,9 @@ def _load_faiss_resources() -> tuple[faiss.Index, list[dict[str, Any]], OllamaEm
         logger.debug("Ressources FAISS déjà en mémoire (cache hit).")
         return _faiss_index, _faiss_metadata, _ollama_embedder
 
-    # Construction des chemins depuis la configuration centralisée
     chemin_index = FAISS_INDEX_DIR / "horror_index.faiss"
     chemin_meta = FAISS_INDEX_DIR / "metadata.pkl"
 
-    # 1. Vérification des artefacts sur disque
     if not chemin_index.exists():
         logger.error(f"Index FAISS introuvable : {chemin_index}")
         raise FileNotFoundError(f"Index FAISS manquant : {chemin_index}")
@@ -81,16 +84,13 @@ def _load_faiss_resources() -> tuple[faiss.Index, list[dict[str, Any]], OllamaEm
         logger.error(f"Métadonnées introuvables : {chemin_meta}")
         raise FileNotFoundError(f"Métadonnées manquantes : {chemin_meta}")
 
-    # 2. Chargement binaire FAISS
     logger.info(f"Chargement de l'index FAISS : {chemin_index}")
     _faiss_index = faiss.read_index(str(chemin_index))
 
-    # 3. Désérialisation des métadonnées
     logger.info(f"Chargement des métadonnées : {chemin_meta}")
     with open(chemin_meta, "rb") as fh:
         _faiss_metadata = pickle.load(fh)
 
-    # 4. Initialisation de l'embedder (strictement le même modèle que build)
     logger.info(
         f"Initialisation Ollama pour les requêtes : {OLLAMA_EMBEDDING_MODEL} "
         f"({OLLAMA_BASE_URL})"
@@ -117,45 +117,35 @@ def search_local_horror_lore(
     L'algorithme suit les étapes suivantes :
 
     1. Préfixe la requête avec ``"search_query: "`` pour respecter le format
-       d'instruction du modèle ``nomic-embed-text`` (optimisé pour distinguer
-       les requêtes des documents).
+       d'instruction du modèle ``nomic-embed-text``.
     2. Génère l'embedding de la question via Ollama.
     3. Normalise le vecteur requête en L2 pour préserver l'équivalence
        *InnerProduct* = *Cosine Similarity*.
     4. Interroge l'index FAISS et croise les indices retournés avec les
        métadonnées en mémoire.
 
-    Args:
-        query: Question ou phrase clé saisie par l'utilisateur.
-        top_k: Nombre maximum de documents voisins à retourner.
+    Parameters
+    ----------
+    query :
+        Question ou phrase clé saisie par l'utilisateur.
+    top_k :
+        Nombre maximum de documents voisins à retourner.
 
-    Returns:
-        Une liste ordonnée par pertinence décroissante. Chaque élément est un
-        dictionnaire contenant :
-
-        - ``chunk`` (*str*) : extrait / reconstruction du contenu indexé.
-        - ``metadata`` (*dict*) : sous-dictionnaire avec ``titre``,
-          ``annee_sortie`` et ``source`` (valeur fixe ``"faiss_local"``).
-        - ``score`` (*float*) : similarité cosinus entre 0 et 1.
+    Returns
+    -------
+    list[dict[str, Any]]
+        Résultats ordonnés par pertinence décroissante. Chaque élément
+        contient ``chunk``, ``metadata`` et ``score``.
     """
     index, metas, embedder = _load_faiss_resources()
 
-    # ------------------------------------------------------------------
-    # 1. Formatage conforme au modèle d'embedding Nomic
-    # ------------------------------------------------------------------
     formatted_query = f"search_query: {query.strip()}"
     logger.debug(f"Requête formatée : {formatted_query[:80]}...")
 
-    # ------------------------------------------------------------------
-    # 2. Vectorisation puis normalisation L2
-    # ------------------------------------------------------------------
     query_vector = embedder.embed_query(formatted_query)
     query_np = np.array([query_vector], dtype=np.float32)
     faiss.normalize_L2(query_np)
 
-    # ------------------------------------------------------------------
-    # 3. Recherche des k plus proches voisins
-    # ------------------------------------------------------------------
     distances, indices = index.search(query_np, top_k)
 
     results: list[dict[str, Any]] = []
@@ -192,28 +182,9 @@ def search_local_horror_lore(
     return results
 
 
-def _get_db_connection() -> psycopg2.extensions.connection:
-    """
-    Établit une connexion PostgreSQL via la configuration centralisée.
-
-    Raises:
-        RuntimeError: Si ``DATABASE_URL`` n'est pas définie.
-        psycopg2.Error: Si la connexion échoue.
-    """
-    if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL n'est pas configurée. "
-            "Vérifiez votre fichier .env ou src/config.py."
-        )
-
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        logger.debug("Connexion PostgreSQL établie via DATABASE_URL.")
-        return conn
-    except Exception as exc:
-        logger.error(f"Échec connexion PostgreSQL : {exc}")
-        raise
-
+# ═══════════════════════════════════════════════════════════════════════
+# PARTIE 2 — APPELS HTTP VERS data-api (remplace psycopg2)
+# ═══════════════════════════════════════════════════════════════════════
 
 def query_movie_metadata(
     titre: str | None = None,
@@ -221,304 +192,159 @@ def query_movie_metadata(
     top_k: int = 5,
 ) -> list[dict[str, Any]]:
     """
-    Récupère les métadonnées structurées d'un film depuis Supabase.
-    Requête entièrement paramétrée.
+    Récupère les métadonnées structurées d'un film via le data-api.
+
+    Selon les arguments fournis, appelle soit l'endpoint de recherche
+    textuelle (``/films/search``), soit la lecture directe par ID
+    (``/films/{id}``).
+
+    Parameters
+    ----------
+    titre :
+        Fragment du titre pour une recherche ILIKE.
+    id_film :
+        Identifiant exact pour une lecture directe.
+    top_k :
+        Nombre maximum de résultats (uniquement pour la recherche par titre).
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        Liste de fiches normalisées (réalisateur, genres, casting, etc.).
+
+    Raises
+    ------
+    ValueError
+        Si ni ``titre`` ni ``id_film`` n'est fourni.
+    RuntimeError
+        Si le data-api retourne une erreur inattendue.
     """
     if not any([titre, id_film]):
         raise ValueError("Il faut fournir au moins 'titre' ou 'id_film'.")
 
-    conn = _get_db_connection()
-    cur = conn.cursor()
+    with httpx.Client(timeout=10.0) as client:
+        if id_film is not None:
+            url = f"{DATA_API_URL}/films/{id_film}"
+            resp = client.get(url)
 
-    sql = """
-        SELECT
-            f.id_film,
-            f.titre,
-            f.annee_sortie,
-            f.langue_originale,
-            f.synopsis,
-            f.tagline,
-            f.duree,
-            f.budget,
-            f.revenue,
-            r.nom AS realisateur_nom,
-            COALESCE(
-                array_agg(DISTINCT g.nom)
-                FILTER (WHERE g.nom IS NOT NULL),
-                ARRAY[]::text[]
-            ) AS genres,
-            COALESCE(
-                array_agg(DISTINCT a.nom)
-                FILTER (WHERE a.nom IS NOT NULL),
-                ARRAY[]::text[]
-            ) AS casting
-        FROM film f
-        LEFT JOIN realisateur r ON r.id_realisateur = f.id_realisateur
-        LEFT JOIN film_genre fg ON fg.id_film = f.id_film
-        LEFT JOIN genre g ON g.id_genre = fg.id_genre
-        LEFT JOIN film_acteur fa ON fa.id_film = f.id_film
-        LEFT JOIN acteur a ON a.id_acteur = fa.id_acteur
-        WHERE {where_clause}
-        GROUP BY 
-            f.id_film, f.titre, f.annee_sortie, f.langue_originale,
-            f.synopsis, f.tagline, f.duree, f.budget, f.revenue,
-            r.nom
-        LIMIT %s
-    """
+            if resp.status_code == 404:
+                logger.warning(f"Film id={id_film} non trouvé sur data-api.")
+                return []
+            resp.raise_for_status()
+            return [resp.json()]
 
-    if id_film is not None:
-        where = "f.id_film = %s"
-        params: list[Any] = [id_film]
-    else:
-        where = "f.titre ILIKE %s"
-        params = [f"%{titre}%"]
-
-    sql = sql.format(where_clause=where)
-    params.append(top_k)
-
-    try:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
-
-    colnames = [
-        "id_film", "titre", "annee_sortie", "langue_originale",
-        "synopsis", "tagline", "duree", "budget", "revenue",
-        "realisateur_nom", "genres", "casting",
-    ]
-
-    results = []
-    for row in rows:
-        d = dict(zip(colnames, row))
-
-        realisateur = (d.get("realisateur_nom") or "").strip() or "Inconnu"
-        genres = d.get("genres") or []
-        casting_list = d.get("casting") or []
-        casting_str = ", ".join(casting_list) if casting_list else "Non renseigné"
-
-        results.append({
-            "id_film": d["id_film"],
-            "titre": d["titre"],
-            "annee_sortie": d.get("annee_sortie"),
-            "langue_originale": d.get("langue_originale"),
-            "synopsis": d.get("synopsis"),
-            "tagline": d.get("tagline"),
-            "duree": d.get("duree"),
-            "budget": d.get("budget"),
-            "revenue": d.get("revenue"),
-            "realisateur": realisateur,
-            "genres": genres,
-            "casting": casting_str,
-        })
-
-    # ========== DÉBUT : ROBUSTESSE DONNÉES (sans toucher Supabase) ==========
-    seen = set()
-    unique_results = []
-    for film in results:
-        titre_clean = str(film.get("titre") or "").strip().lower()
-        annee = film.get("annee_sortie")
-        key = (titre_clean, annee)
-
-        if key not in seen:
-            seen.add(key)
-            unique_results.append(film)
-
-    results = unique_results
-
-    for film in results:
-        real = film.get("realisateur")
-        if not real or str(real).strip().lower() == "inconnu":
-            film["realisateur"] = "Non spécifié"
-
-        if not film.get("genres"):
-            film["genres"] = []
-        if not film.get("casting"):
-            film["casting"] = "Non disponible"
-
-    results = results[:top_k]
-    # ========== FIN : ROBUSTESSE DONNÉES ==========
-
-    return results
+        # Recherche textuelle
+        url = f"{DATA_API_URL}/films/search"
+        params = {"q": titre, "limit": top_k}
+        resp = client.get(url, params=params)
+        resp.raise_for_status()
+        return resp.json()
 
 
-def find_similar_horror_movies(id_film: int, k: int = 5) -> list[dict[str, Any]]:
+def find_similar_horror_movies(
+    id_film: int,
+    k: int = 5,
+) -> list[dict[str, Any]]:
     """
     Recherche les films les plus similaires à un film donné via pgvector.
 
-    Utilise l'opérateur de distance cosinus ``<=>`` fourni par l'extension
-    ``pgvector``. Comme les embeddings générés par ``nomic-embed-text``
-    sont normalisés (norme L2 = 1), la relation suivante est valable :
+    Délegue l'opérateur de distance cosinus ``<=>`` au data-api.
+    Comme les embeddings sont normalisés, la similarité retournée est
+    comprise entre 0 (étranger) et 1 (identique).
 
-        ``similarité_cosinus = 1 - distance_cosinus``
+    Parameters
+    ----------
+    id_film :
+        Identifiant du film de référence.
+    k :
+        Nombre de voisins à retourner.
 
-    Args:
-        id_film: Identifiant du film de référence (doit posséder un
-            embedding dans la colonne ``film.embedding``).
-        k: Nombre de voisins les plus proches à retourner.
+    Returns
+    -------
+    list[dict[str, Any]]
+        Fiches des films voisins avec la clé ``similarite``.
 
-    Returns:
-        Liste ordonnée par pertinence décroissante. Chaque dict contient
-        les mêmes métadonnées structurées que ``query_movie_metadata``,
-        plus la clé ``similarite`` (float entre 0 et 1).
-
-    Raises:
-        RuntimeError: Si le film n'existe pas ou si sa colonne
-            ``embedding`` est ``NULL`` (étape 0.3 non jouée ou incomplète).
+    Raises
+    ------
+    RuntimeError
+        Si le film n'existe pas ou si son embedding est NULL.
     """
-    conn = _get_db_connection()
-    cur = conn.cursor()
+    url = f"{DATA_API_URL}/films/{id_film}/similar"
+    params = {"k": k}
 
-    # Vérification préalable
-    cur.execute(
-        "SELECT embedding IS NOT NULL FROM film WHERE id_film = %s",
-        (id_film,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        cur.close()
-        conn.close()
-        raise RuntimeError(f"Film id={id_film} introuvable en base.")
-    if not row[0]:
-        cur.close()
-        conn.close()
-        raise RuntimeError(
-            f"Film id={id_film} trouvé, mais sa colonne embedding est NULL. "
-            "Avez-vous lancé le script de génération / ingestion des embeddings (étape 0.3) ?"
-        )
+    with httpx.Client(timeout=10.0) as client:
+        resp = client.get(url, params=params)
 
-    sql = """
-        SELECT
-            f.id_film,
-            f.titre,
-            f.annee_sortie,
-            f.langue_originale,
-            f.synopsis,
-            f.tagline,
-            f.duree,
-            f.budget,
-            f.revenue,
-            r.nom AS realisateur_nom,
-            COALESCE(
-                array_agg(DISTINCT g.nom)
-                FILTER (WHERE g.nom IS NOT NULL),
-                ARRAY[]::text[]
-            ) AS genres,
-            COALESCE(
-                array_agg(DISTINCT a.nom)
-                FILTER (WHERE a.nom IS NOT NULL),
-                ARRAY[]::text[]
-            ) AS casting,
-            1 - (f.embedding <=> (
-                SELECT ref.embedding FROM film ref WHERE ref.id_film = %s
-            )) AS similarite
-        FROM film f
-        LEFT JOIN realisateur r ON r.id_realisateur = f.id_realisateur
-        LEFT JOIN film_genre fg ON fg.id_film = f.id_film
-        LEFT JOIN genre g ON g.id_genre = fg.id_genre
-        LEFT JOIN film_acteur fa ON fa.id_film = f.id_film
-        LEFT JOIN acteur a ON a.id_acteur = fa.id_acteur
-        WHERE f.id_film != %s
-          AND f.embedding IS NOT NULL
-          AND f.embedding <=> (SELECT ref.embedding FROM film ref WHERE ref.id_film = %s) > 0
-        GROUP BY 
-            f.id_film, f.titre, f.annee_sortie, f.langue_originale,
-            f.synopsis, f.tagline, f.duree, f.budget, f.revenue,
-            r.nom
-        ORDER BY f.embedding <=> (
-            SELECT ref.embedding FROM film ref WHERE ref.id_film = %s
-        )
-        LIMIT %s;
-    """
-
-    try:
-        cur.execute(sql, (id_film, id_film, id_film, id_film, k))
-        rows = cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
-
-    colnames = [
-        "id_film", "titre", "annee_sortie", "langue_originale",
-        "synopsis", "tagline", "duree", "budget", "revenue",
-        "realisateur_nom", "genres", "casting", "similarite",
-    ]
-
-    results: list[dict[str, Any]] = []
-    for row in rows:
-        d = dict(zip(colnames, row))
-
-        real = (d.get("realisateur_nom") or "").strip()
-        realisateur = real if real else "Non spécifié"
-
-        genres = d.get("genres") or []
-        casting_list = d.get("casting") or []
-        casting = ", ".join(casting_list) if casting_list else "Non renseigné"
-
-        results.append({
-            "id_film": d["id_film"],
-            "titre": d["titre"],
-            "annee_sortie": d.get("annee_sortie"),
-            "langue_originale": d.get("langue_originale"),
-            "synopsis": d.get("synopsis"),
-            "tagline": d.get("tagline"),
-            "duree": d.get("duree"),
-            "budget": d.get("budget"),
-            "revenue": d.get("revenue"),
-            "realisateur": realisateur,
-            "genres": genres,
-            "casting": casting,
-            "similarite": round(float(d["similarite"]), 4),
-        })
+        if resp.status_code == 404:
+            raise RuntimeError(f"Film id={id_film} introuvable en base.")
+        if resp.status_code == 400:
+            detail = resp.json().get("detail", "Colonne embedding NULL ou erreur métier.")
+            raise RuntimeError(detail)
+        resp.raise_for_status()
+        data = resp.json()
 
     logger.info(
-        f"pgvector similarity : {len(results)} voisin(s) trouvé(s) pour id_film={id_film}"
+        f"pgvector similarity (via data-api) : {len(data)} voisin(s) "
+        f"trouvé(s) pour id_film={id_film}"
     )
+    return data
 
-    return results
 
-
-def fuzzy_find_film(raw_title: str, score_cutoff: float = 60.0) -> dict | None:
+def fuzzy_find_film(
+    raw_title: str,
+    score_cutoff: float = 60.0,
+) -> dict[str, Any] | None:
     """
-    Corrige un titre mal orthographié via rapidfuzz.
-    Retourne {"id_film", "titre", "score"} ou None.
+    Corrige un titre mal orthographié en interrogeant le data-api.
+
+    Le data-api exécute ``rapidfuzz`` sur l'ensemble du catalogue et
+    retourne le meilleur candidat.
+
+    Parameters
+    ----------
+    raw_title :
+        Titre potentiellement mal orthographié.
+    score_cutoff :
+        Seuil de confiance minimum (0–100).
+
+    Returns
+    -------
+    dict | None
+        ``{"id_film": int, "titre": str, "score": float}`` ou ``None``.
     """
-    conn = _get_db_connection()
-    cur = conn.cursor()
+    url = f"{DATA_API_URL}/films/fuzzy"
+    params = {"title": raw_title, "score_cutoff": score_cutoff}
 
-    try:
-        cur.execute("SELECT id_film, titre FROM film WHERE titre IS NOT NULL")
-        rows = cur.fetchall()
-    finally:
-        cur.close()
-        conn.close()
+    with httpx.Client(timeout=10.0) as client:
+        resp = client.get(url, params=params)
 
-    if not rows:
-        return None
-
-    choices = {titre: id_f for id_f, titre in rows}
-
-    result = process.extractOne(
-        raw_title,
-        choices.keys(),
-        scorer=fuzz.token_sort_ratio,
-        processor=str.lower,
-        score_cutoff=score_cutoff,
-    )
-
-    if result is None:
-        return None
-
-    best_title, score, _idx = result
-    return {
-        "id_film": choices[best_title],
-        "titre": best_title,
-        "score": round(float(score), 2),
-    }
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
 
 
 def resolve_film(raw_query: str, score_cutoff: float = 60.0) -> int:
+    """
+    Résout une requête textuelle approximative en identifiant technique.
+
+    Parameters
+    ----------
+    raw_query :
+        Titre potentiellement mal orthographié.
+    score_cutoff :
+        Seuil de confiance minimum.
+
+    Returns
+    -------
+    int
+        ``id_film`` du meilleur candidat.
+
+    Raises
+    ------
+    RuntimeError
+        Si aucun film ne correspond suffisamment.
+    """
     match = fuzzy_find_film(raw_query, score_cutoff=score_cutoff)
     if match is None:
         raise RuntimeError(

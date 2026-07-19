@@ -1188,3 +1188,117 @@ Le reste de la fonction reste inchangé. Le API_KEY est déjà défini en haut d
 5) modifier src/graph/nodes.py
    test a faire : ` python -c "from src.graph.nodes import _get_narrator_llm; llm = _get_narrator_llm(); print(llm.model, llm.base_url)" `
 6) modifier data/build_faiss_index.py
+
+# Phase 6 : Extraction de la Couche Données (API dédiée) #
+
+Actuellement, rag_tool.py ouvre une connexion directe à Supabase avec psycopg2. C'est pratique en développement, mais c'est une faille d'architecture :
+- Le mot de passe Supabase transite dans le code du backend métier.
+- Si on change de base, tu dois modifier tous les outils.
+- La couche "accès aux données" n'est pas testable / mockable proprement.
+
+L'idée est donc de créer un service FastAPI dédié, interne, qui sera le seul à parler à PostgreSQL. Ton API principale (src/main.py, port 8000) deviendra un client HTTP de ce nouveau service (data_api, port 8001).On respecte le principe : "La base est inaccessible depuis l'extérieur du cluster".
+
+## 6.1 Créer le service data_api ##
+
+1) Creation de l'architecture :
+    ```
+    horragor-project/
+    ├── data_api/      ← (NOUVEAU)
+    │   ├── __init__.py
+    │   ├── database.py
+    │   ├── models.py
+    │   ├── main.py
+    │   └── routers/
+    │       ├── __init__.py
+    │       └── films.py
+
+2) data_api/database.py  
+On utilise un pool de connexions synchrones. FastAPI exécute les fonctions def dans un threadpool, donc le service reste non-bloquant.
+
+3) data_api/models.py  
+On définit les schémas de données. Le modèle FilmDetail est la représentation canonique d'un film dans notre API.
+
+4) data_api/routers/films.py
+C'est ici qu'on écrit les endpoints qui remplaceront les requêtes brutes de rag_tool.py.
+
+5) data_api/main.py
+
+6) dans src/config.py rajouter 
+    ```
+    # ═══════════════════════════════════════════════════════════════
+    # Service interne data-api (Phase 6)
+    # ═══════════════════════════════════════════════════════════════
+    # URL complète vers le micro-service d'accès aux données.
+    # En dev c'est localhost:8001, en Docker ce sera http://data-api:8001
+    # sur le réseau interne.
+    # ═══════════════════════════════════════════════════════════════
+    DATA_API_URL: str = os.getenv("DATA_API_URL", "http://localhost:8001")
+    ```
+
+    test dans le navigateur ` http://127.0.0.1:8001/health `
+    ou 
+    ```
+    # 1. Santé
+    curl http://127.0.0.1:8001/health
+
+    # 2. Recherche textuelle
+    curl "http://127.0.0.1:8001/films/search?q=exorcist&limit=2"
+
+    # 3. Film par ID (remplace 1 par un vrai id de ta base)
+    curl http://127.0.0.1:8001/films/3937
+    ```
+## 6.2 Migrer rag_tool.py vers ce service ##
+Il y a 3 étapes :
+
+| Étape | Action | Fichier(s) concerné(s) |
+|-------|--------|------------------------|
+| **1** | **Terminer le `data-api`** pour qu'il expose tous les endpoints dont `rag_tool.py` a besoin (recherche textuelle, détail par ID, similarité pgvector par ID, fuzzy). | `data_api/routers/films.py` |
+| **2** | **Réécrire `rag_tool.py`** pour qu'il appelle le `data-api` via `httpx` au lieu de `psycopg2`. | `src/tools/rag_tool.py` |
+| **3** | **Nettoyer & tester** : supprimer `psycopg2` du côté Intelligence, vérifier les appels. | `.env`, `src/config.py`, etc. |
+
+1) Terminer data_api/routers/films.py  
+data-api existe mais il renvoie encore beaucoup de null (pas de jointures). De plus, il lui manque l'endpoint de similarité par ID et de fuzzy matching.
+   - Vérifie la dépendance rapidfuzz => ` uv add rapidfuzz `
+   - modifier data_api/routers/films.py pour integrer les jointures et les 4 endpoints nécessaires.
+   - Vérifie que data-api démarre toujours => ` uvicorn data_api.main:app --host 127.0.0.1 --port 8001 --reload `
+   - Tester les 4 endpoints
+        ```
+        # Test A : recherche textuelle avec jointures
+        curl "http://127.0.0.1:8001/films/search?q=exorcist&limit=1"
+
+        # Test B : détail par ID
+        curl "http://127.0.0.1:8001/films/3937"
+
+        # Test C : similarité pgvector
+        curl "http://127.0.0.1:8001/films/3937/similar?k=2"
+
+        # Test D : fuzzy
+        curl "http://127.0.0.1:8001/films/fuzzy?title=conjuring"
+        ```
+
+2) Réécrire src/tools/rag_tool.py
+- Installer  httpx côté API Intelligence => uv add httpx
+- Remplacer le contenu de src/tools/rag_tool.py  
+  Les seules parties conservées sont FAISS (qui reste local) et la logique métier (formatage, fuzzy, etc.). Tout le SQL a été remplacé par des appels httpx vers DATA_API_URL.
+
+3) Nettoyer les imports inutiles dans src/config.py si besoin
+   
+4) Tester de la migration  
+Lance les 2 services (dans 2 terminaux séparés) :
+   - Terminal 1 — data-api => ` uvicorn data_api.main:app --host 127.0.0.1 --port 8001 `
+   - Terminal 2 — API Intelligence =>  ` uvicorn src.main:app --host 127.0.0.1 --port 8000 --reload `  
+
+Puis teste depuis un 3ème terminal que rag_tool.py fonctionne encore via le nouveau chemin HTTP :  
+```
+# Test A : métadonnées structurées (appelle data-api en interne)
+uv run python -c "from src.tools.rag_tool import query_movie_metadata; print(query_movie_metadata(titre='exorcist', top_k=2))"
+
+# Test B : similarité pgvector
+uv run python -c "
+from src.tools.rag_tool import find_similar_horror_movies
+print(find_similar_horror_movies(3937, k=2))
+"
+
+# Test C : fuzzy → resolve
+uv run python -c "from src.tools.rag_tool import fuzzy_find_film, resolve_film; print(fuzzy_find_film('conjuring')); print(resolve_film('conjuring'))"
+```

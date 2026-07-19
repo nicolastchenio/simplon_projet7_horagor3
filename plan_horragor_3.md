@@ -37,7 +37,7 @@ horragor-project/
 └── .env
 ```
 
-À partir de la Phase 6, cette arborescence évolue vers 3 services séparés (`data-api/`, `intelligence-api/` = le contenu ci-dessus, `frontend/`) — inutile de l'anticiper maintenant.
+À partir de la Phase 6, cette arborescence évolue vers 3 services séparés (`data_api/`, `intelligence-api/` = le contenu ci-dessus, `frontend/`) — inutile de l'anticiper maintenant.
 
 ### 0.2 Installer les dépendances ###
 
@@ -282,17 +282,52 @@ Envoie déjà un header `X-API-Key` en placeholder pour préparer le terrain (la
 
 **Objectif** : la base doit être encapsulée derrière sa propre API, strictement inaccessible depuis l'extérieur du cluster. Tant que `rag_tool.py` appelle Supabase directement, cette exigence n'est pas respectée.
 
-### 6.1 Créer le service data-api ###
+Streamlit ne touche pas Supabase directement. on va construire une architecture en 3v couche, Imagine un restaurant :
 
-Crée un service FastAPI minimal séparé (`data-api/`) qui encapsule tout l'accès Supabase : endpoints internes type `GET /films/search`, `GET /films/{id}`, `POST /films/similar` (exécute la recherche pgvector).
+| Couche | Rôle | Dans ton projet |
+|--------|------|-----------------|
+| **Salle** 🍽️ | L'interface où le client parle | **Streamlit** (`app_frontend.py`) |
+| **Cuisine** 👨‍🍳 | Le chef qui prépare la réponse | **API Intelligence** (`src/main.py` sur le port **8000**) |
+| **Chambre froide** ❄️ | L'endroit sécurisé où sont stockées les denrées | **Data-API** (`data_api/main.py` sur le port **8001**) |
+| **Fournisseur** 🚚 | La source externe (la base) | **Supabase PostgreSQL** |
+
+Le nouveau flux exact d'une question
+```
+
+┌─────────────┐     HTTP/API     ┌──────────────────┐     HTTP/API     ┌──────────────┐     SQL+SSL      ┌──────────┐
+│  Streamlit  │ ───────────────► │  src/main:8000   │ ───────────────► │ data_api:8001│ ──────────────►│ Supabase │
+│  (UI/user)  │                  │  (Agent LangGraph│                  │  (seule API   │                │  (BDD)   │
+│             │◄─────────────────│   rag_tool.py    │◄─────────────────│   qui parle   │◄───────────────│          │
+│             │    JSON réponse  │   via httpx      │    JSON données  │   à la BDD)   │                │          │
+└─────────────┘                  └──────────────────┘                  └──────────────┘                └──────────┘
+```
+
+Ce qui est crucial :
+- rag_tool.py (appelé par l'agent sur le port 8000) n'utilise plus psycopg2 vers Supabase. Il utilise httpx vers http://localhost:8001.
+- Streamlit ne sait même pas que Supabase existe. Il ne connaît que l'URL http://localhost:8000/chat.
+- Supabase ne voit que le data-api (port 8001). Le mot de passe DATABASE_URL n'est plus présent dans le code de l'agent (port 8000), ni dans rag_tool.py.
+
+Pourquoi il faut toujours lancer uvicorn src.main:app --port 8000 ?
+
+Si on n'ouvre que le data-api (port 8001), on a juste un "disque dur" intelligent qui répond aux requêtes films/similarité. Mais :
+- Il n'y a pas d'agent LangGraph.
+- Il n'y a pas de narration gothique.
+- Il n'y a pas de pipeline RAG / Scraper / Narration.
+- Streamlit ne pourra rien afficher, car son bouton "Envoyer" est câblé sur http://localhost:8000/chat.
+
+Le port 8000 est le cerveau. Le port 8001 est le disque dur sécurisé. Il faut les deux.
+
+### 6.1 Créer le service data_api ###
+
+Crée un service FastAPI minimal séparé (`data_api/`) qui encapsule tout l'accès Supabase : endpoints internes type `GET /films/search`, `GET /films/{id}`, `POST /films/similar` (exécute la recherche pgvector).
 
 ### 6.2 Migrer rag_tool.py vers ce service ###
 
-`rag_tool.py` (côté API Intelligence) appelle désormais `data-api` via `httpx` au lieu d'interroger Supabase en direct. Les identifiants Supabase ne vivent plus que dans l'environnement de `data-api`.
+`rag_tool.py` (côté API Intelligence) appelle désormais `data_api` via `httpx` au lieu d'interroger Supabase en direct. Les identifiants Supabase ne vivent plus que dans l'environnement de `data_api`.
 
 ### 6.3 FAISS reste côté Intelligence ###
 
-L'index FAISS (local, en RAM) reste dans l'API Intelligence : ce n'est pas un accès "base de données" au sens du sujet, inutile de le faire transiter par `data-api`.
+L'index FAISS (local, en RAM) reste dans l'API Intelligence : ce n'est pas un accès "base de données" au sens du sujet, inutile de le faire transiter par `data_api`.
 
 ### 6.4 Étendre la documentation ###
 
@@ -306,7 +341,7 @@ Ajoute ce nouveau service au périmètre de la documentation Sphinx (Phase 9).
 
 Crée 3 conteneurs + un réseau privé :
 
-- `data-api` : aucun port publié vers l'hôte, joignable uniquement par `intelligence-api` ; seule à détenir les identifiants Supabase.
+- `data_api` : aucun port publié vers l'hôte, joignable uniquement par `intelligence-api` ; seule à détenir les identifiants Supabase.
 - `intelligence-api` : joignable par `frontend` via le réseau interne ; en développement tu peux publier son port pour tester `/docs`, mais en configuration sécurisée ne l'expose pas.
 - `frontend` : seul service avec un port publié vers l'hôte (`8501`).
 
@@ -375,7 +410,7 @@ Génère la documentation HTML finale.
 
 - Teste chaque node indépendamment (mock des outils).
 - Teste le router avec des states variés (résultats riches vs résultats vides).
-- Teste les endpoints de `data-api` avec la BDD mockée.
+- Teste les endpoints de `data_api` avec la BDD mockée.
 
 ### 10.2 Tests d'intégration ###
 
