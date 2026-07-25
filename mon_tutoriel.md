@@ -1302,3 +1302,984 @@ print(find_similar_horror_movies(3937, k=2))
 # Test C : fuzzy → resolve
 uv run python -c "from src.tools.rag_tool import fuzzy_find_film, resolve_film; print(fuzzy_find_film('conjuring')); print(resolve_film('conjuring'))"
 ```
+
+# Phase 7 : Conteneurisation, Auth & Réseau #
+## 7.1 Docker & Docker Compose
+L'objectif est de figer l'application dans 3 images isolées qui communiquent uniquement à l'intérieur d'un réseau privé Docker (horragor-net). En configuration sécurisée, seul Streamlit expose un port vers l'hôte (8501). Pour préserver cette contrainte tout en permettant le débogage, l'architecture repose sur deux fichiers d'orchestration : une base stricte et un override de développement.
+
+### Principe de l'architecture réseau
+
+Dans Docker, chaque conteneur possède son propre espace réseau et ne connaît pas les ports de l'hôte. Lorsqu'ils partagent un même réseau bridge (horragor-net), ils peuvent se joindre par leur nom de service défini dans le compose :
+- intelligence-api appelle http://data-api:8001 (Data API)
+- frontend appelle http://intelligence-api:8000 (Intelligence API)
+- Le navigateur de l'utilisateur, lui, ne voit que http://localhost:8501
+
+Les identifiants Supabase restent ainsi confinés dans le conteneur data-api, et le moteur LLM (Ollama) reste accessible uniquement par intelligence-api via host.docker.internal.
+
+### Construction des images
+Trois images sont construites à la demande grâce aux Dockerfile placés dans le dossier docker/ :
+- docker/data_api.Dockerfile : image légère basée sur python:3.12-slim. Seuls les fichiers strictement nécessaires sont copiés : src/__init__.py et src/config.py (la configuration Supabase), ainsi que le code spécifique du Data API. Le graphe LangGraph et les outils de l'Intelligence ne sont pas embarqués ici.
+- docker/intelligence_api.Dockerfile : image complète embarquant libgomp1 (requis par faiss-cpu), l'intégralité du package src/, l'index FAISS sous data/faiss_index et le fichier pyproject.toml. Les variables OLLAMA_BASE_URL=http://host.docker.internal:11434 et DATA_API_URL=http://data-api:8001 lui permettent de joindre Ollama sur l'hôte Windows et le Data API sur le réseau interne.
+- docker/frontend.Dockerfile : image Streamlit avec httpx et PYTHONPATH=/app. Elle copie l'ensemble du dossier src/ (nécessaire pour l'import src.config), le script app_frontend.py et le dossier .streamlit/.
+
+### Orchestration : deux configurations pour deux usages
+
+Pour respecter l'exigence de sécurité (seul le frontend exposé) sans bloquer le développement, on utilise le mécanisme de fusion de fichiers de Docker Compose.
+
+#### Fichier de base : docker-compose.yml
+Ce fichier décrit la configuration cible et sécurisée. Il déclare les 3 services avec la directive build pour reconstruire automatiquement les images si elles sont absentes, surcharge les variables d'environnement pour utiliser les noms de service internes (ex. API_BASE_URL=http://intelligence-api:8000), et n'expose aucun port pour les deux APIs.
+
+#### Fichier d'override : docker-compose.dev.yml
+Ce second fichier, placé à côté du premier, contient uniquement les différences nécessaires au mode développement. Il ajoute temporairement les sections ports: pour data-api (8001:8001) et intelligence-api (8000:8000). Docker Compose fusionne les deux fichiers à l'exécution : la base définit le réseau, les variables et les dépendances, tandis que l'override injecte les ports de debug sans modifier l'image de production.
+
+| Mode | Commande | Ports exposés | Usage |
+|------|----------|---------------|-------|
+| **Production / Sujet** | `docker compose up -d` | Seul `8501` (Streamlit) | Respect strict du périmètre de sécurité. Les APIs sont invisibles depuis l'hôte mais communiquent en interne. |
+| **Développement** | `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d` | `8501`, `8000`, `8001` | Swagger (`/docs`) et tests directs sur les APIs accessibles depuis le navigateur/Postman. |
+
+1) Dockerfile du data_api
+- creer "docker/data_api.Dockerfile"
+  
+    | Instruction | Pourquoi on fait ça |
+    |-------------|---------------------|
+    | `python:3.12-slim` | Image légère (~60 Mo) suffisante pour FastAPI + psycopg. Pas besoin de la version "full" ou d'Alpine (qui complique les builds Python). |
+    | `PYTHONUNBUFFERED=1` | Force Python à afficher les logs immédiatement. Indispensable pour voir les erreurs dans `docker logs`. |
+    | `uv pip install --system` | Dans un conteneur, on n'a pas besoin de virtualenv. On installe directement dans l'environnement système Python. |
+    | `COPY pyproject.toml` avant le code | **Cache Docker magique** : si tu modifies juste un `.py`, Docker réutilise la layer des dépendances déjà installées. Le build est instantané. |
+    | `COPY src/config.py` seul | Respect du principe : on n'embarque pas tout `src/` (pas besoin du graphe LangGraph ici). Juste la config. |
+    | `EXPOSE 8001` | Documente le port. Le `docker-compose.yml` l'utilisera plus tard pour le mapping. |
+    | **`python:3.12-slim`** | Ton `pyproject.toml` exige `>=3.12`. On s'aligne exactement. |
+    | **`RUN mkdir -p src`** | Prépare le dossier avant de copier les fichiers dedans. |
+    | **`COPY src/__init__.py src/`** | Nécessaire pour que Python traite `src` comme un package. Sans ça, `from src.config import ...` pourrait échouer selon le contexte. |
+
+- Créer ".dockerignore" à la racine de ton projet (au même niveau que .env)
+- Commande pour tester le build :
+  - Depuis la racine de ton projet : ` docker build -f docker\data_api.Dockerfile -t horragor-data-api:1.0 . `
+  - Si on est en train de coder et que de rebuilds souvent, ajouter --no-cache quand on modifie les dépendances : `docker build --no-cache -f docker\data_api.Dockerfile -t horragor-data-api:1.0 . `
+  - Lancer le conteneur (méthode rapide avec ton .env), puisque ton .env est déjà à la racine, Docker peut le lire directement et injecter les variables dans le conteneur : ` docker run --rm -p 8001:8001 --env-file .env horragor-data-api:1.0 `
+  - Vérifie ensuite : http://localhost:8001/docs doit afficher ta documentation Swagger.
+  
+2) Dockerfile pour ton API Intelligence (FastAPI + LangGraph + FAISS)  
+Il est plus complet que celui du data-api car il embarque tout le package src/, l'index FAISS, et la librairie système libgomp1 requise par faiss-cpu.
+
+   -  Créer le fichier "docker\intelligence_api.Dockerfile"
+   -  creer un ".env.docker" à la racine:
+   -  build  => ` docker build -f docker\intelligence_api.Dockerfile -t horragor-intelligence-api:1.0 . `
+   -  lancer => ` docker run --rm --env-file .env.docker -p 8000:8000 horragor-intelligence-api:1.0 `  
+   Ouvre ton navigateur sur http://localhost:8000/docs pour vérifier que l'API Intelligence est en ligne.
+   - Si on veut tester l'index FAISS dans le conteneur, Pour s'assurer que l'index est bien là, tu peux lancer un shell dans l'image : ` docker run -it --rm --env-file .env horragor-intelligence-api:1.0 sh `  
+   Puis dans le shell => ` ls -la /app/data/faiss_index `
+   On doit voir les fichiers index.faiss, metadata.json, etc.
+
+3) Dockerfile pour le frontend Streamlit
+Le frontend Streamlit est le plus simple des trois conteneurs : il n'a besoin que de Streamlit + d'un client HTTP (requests) pour discuter avec l'API Intelligence.
+   - Créer le fichier docker/frontend.Dockerfile
+
+        | Élément | Pourquoi |
+        |---|---|
+        | **`httpx`** remplace `requests` | le code utilise `import httpx`, pas `requests`. |
+        | **`PYTHONPATH=/app`** | Obligatoire car tu fais des imports absolus (`from src.config import ...`). Sans ça, Python ne trouve pas le package `src`. |
+        | **`COPY src/ src/`** | le frontend dépend de `src/config.py`. On copie donc tout le dossier `src/`. |
+
+    - build => ` docker build -t horragor-frontend -f docker/frontend.Dockerfile . `
+    - lancer => ` docker run -d --name horragor-front-test -p 8501:8501 -e API_BASE_URL=http://host.docker.internal:8000 horragor-frontend `
+  
+        | Option | Signification |
+        |---|---|
+        | `-d` | Lance en arrière-plan (tu récupères la main dans le terminal) |
+        | `--name horragor-front-test` | Nom du conteneur pour plus facilement le gérer |
+        | `-p 8501:8501` | Redirige le port 8501 du conteneur vers ton PC (`localhost:8501`) |
+        | `-e API_BASE_URL=http://host.docker.internal:8000` | **Essentiel** : dit au frontend d'appeler ton API qui tourne sur Windows, pas dans le conteneur |
+        | `horragor-frontend` | Le nom de l'image qu'on vient de builder |
+
+   - ouvrir le navigateur => http://localhost:8501
+
+## docker-compose.yml ##
+### 1. Placement des fichiers
+Placez les deux fichiers docker-compose.yml (base) et docker-compose.dev.yml (override) dans le même répertoire que vos fichiers d'environnement :
+```
+📁 votre-projet/
+├── docker-compose.yml           ← configuration "Sujet" / Production
+├── docker-compose.dev.yml       ← override développement (ports API temporaires)
+├── .env                         ← variables Data API
+├── .env.docker                  ← variables Intelligence API
+├── docker/                      ← Dockerfiles
+│   ├── data_api.Dockerfile
+│   ├── intelligence_api.Dockerfile
+│   └── frontend.Dockerfile
+├── data_api/                    ← code source Data API
+```
+
+### 2. Principe de sécurité du réseau
+Conformément aux exigences du projet, l'architecture réseau suit cette règle stricte :
+
+| Service | Port interne | Port publié vers l'hôte | Accessible par... |
+|---------|--------------|-------------------------|-------------------|
+| `data-api` | `8001` | ❌ **Aucun** | Uniquement `intelligence-api` via le réseau Docker |
+| `intelligence-api` | `8000` | ❌ **Aucun** | Uniquement `frontend` via le réseau Docker |
+| `frontend` | `8501` | ✅ `8501:8501` | Le navigateur de l'utilisateur |
+
+
+
+Les conteneurs communiquent entre eux par leur nom de service sur le réseau interne horragor-net :
+- Le frontend appelle http://intelligence-api:8000
+- L'intelligence appelle http://data-api:8001
+
+Le PC hôte (Windows) ne voit que Streamlit. Les identifiants Supabase et le moteur LLM restent enfermés dans le périmètre Docker.
+
+### 3. Fichier docker-compose.yml (base — mode Production)
+Ce fichier définit la configuration sujet. Aucun port critique n'est exposé.
+
+### 4. Fichier docker-compose.dev.yml (override — mode Développement)
+Ce fichier ne contient que les différences par rapport au précédent. Docker Compose va les fusionner. Il sert uniquement à ouvrir temporairement les ports des APIs pour consulter la documentation Swagger (/docs) et tester avec Postman.
+Créer un fichier nommé exactement docker-compose.dev.yml à côté du premier
+
+Pourquoi ça fonctionne ?Docker Compose lit d'abord le fichier de base, puis applique le fichier d'override. Le docker-compose.dev.yml ajoute les sections ports: manquantes sans écraser le reste de la configuration (réseau, variables, dépendances, etc.).
+
+### 5. Lancer les services
+#### Mode "Sujet" / Production (sécurisé, seul Streamlit est visible)
+Depuis le répertoire contenant les fichiers .yml :
+```
+docker compose down
+docker compose up -d --build
+```
+Vérification :
+```
+docker ps
+```
+Résultat attendu en production :
+```
+CONTAINER ID   IMAGE                         PORTS                    NAMES
+xxxxxxxxxxxx   horragor-data-api:1.0          <aucun>                  horragor-data
+xxxxxxxxxxxx   horragor-intelligence-api:1.0  <aucun>                  horragor-ia
+xxxxxxxxxxxx   horragor-frontend:latest       0.0.0.0:8501->8501/tcp   horragor-front
+```
+
+| Service | URL | État |
+|---|---|---|
+| Frontend Streamlit | http://localhost:8501 | ✅ Accessible |
+| Data API (Swagger) | http://localhost:8001/docs | ❌ Inaccessible (normal, c'est le but) |
+| Intelligence API (Swagger) | http://localhost:8000/docs | ❌ Inaccessible |
+
+Les 3 conteneurs communiquent néanmoins parfaitement entre eux via le réseau interne horragor-net.
+
+#### Mode Développement (accès temporaire aux APIs)
+Pour déboguer ou consulter la documentation Swagger des APIs :
+```
+docker compose down
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+Vérification :
+```
+docker ps
+```
+Résultat attendu en développement :
+```
+CONTAINER ID   IMAGE                         PORTS                    NAMES
+xxxxxxxxxxxx   horragor-data-api:1.0          0.0.0.0:8001->8001/tcp   horragor-data
+xxxxxxxxxxxx   horragor-intelligence-api:1.0  0.0.0.0:8000->8000/tcp   horragor-ia
+xxxxxxxxxxxx   horragor-frontend:latest       0.0.0.0:8501->8501/tcp   horragor-front
+```
+
+| Service | URL | État |
+|---|---|---|
+| Frontend Streamlit | http://localhost:8501 | ✅ Accessible |
+| Intelligence API (Swagger) | http://localhost:8000/docs | ✅ Accessible |
+| Data API (Swagger) | http://localhost:8001/docs | ✅ Accessible |
+
+### 6. Suivre les logs en temps réel
+```
+# Logs de l'Intelligence API (backend LLM)
+docker compose logs -f intelligence-api
+
+# Logs de tous les services
+docker compose logs -f
+
+# Logs d'un service spécifique
+docker compose logs -f data-api
+docker compose logs -f frontend
+```
+
+### 7. Arrêter les services
+```
+docker compose down
+```
+
+Cette commande supprime les containers mais conserve le réseau horragor-net.
+Pour supprimer aussi le réseau :
+```
+docker compose down --remove-orphans
+docker network rm horragor-net
+```
+
+Pour redémarrer après un arrêt :
+```
+docker compose up -d
+```
+
+### 8. Récapitulatif des modes
+| Fichier(s) utilisé(s) | Commande | Ports ouverts | Usage |
+|-----------------------|----------|---------------|-------|
+| `docker-compose.yml` seul | `docker compose up -d` | Seul `8501` | **Production / Sujet** — respect strict du périmètre de sécurité |
+| Base + `docker-compose.dev.yml` | `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d` | `8501`, `8000`, `8001` | **Développement** — test des APIs via Swagger/Postman sans toucher au code |
+
+
+------- si besoin -----------------
+
+### 9. Configurer Ollama pour écoute sur toutes les interfaces
+
+Par défaut, Ollama écoute uniquement sur `127.0.0.1` (localhost). Les containers Docker **ne peuvent pas** y accéder. Il faut qu'il écoute sur `0.0.0.0`.
+
+#### A. Arrêter Ollama proprement
+
+Cliquez-droit sur l'icône Ollama dans la barre des tâches Windows → **Quitter**.
+
+#### B. Configurer la variable d'environnement `OLLAMA_HOST`
+
+**Option 1 — Ligne de commande (session courante) :**
+```cmd
+set OLLAMA_HOST=0.0.0.0
+```
+
+**Option 2 — Persistante (recommandée) :**
+1. `Win + R` → tapez `sysdm.cpl` → **Entrée**
+2. Onglet **Avancé** → bouton **Variables d'environnement**
+3. Section **Utilisateur** → **Nouvelle…**
+   - Nom de la variable : `OLLAMA_HOST`
+   - Valeur de la variable : `0.0.0.0`
+4. Validez sur **OK** → **OK** → **OK**
+5. Redémarrez votre PC pour que la variable soit prise en compte.
+
+#### C. Relancer Ollama
+
+Depuis le menu Démarrer Windows, lancez **Ollama** à nouveau.
+
+#### D. Vérifier avec `netstat`
+
+Ouvrez un **nouveau** terminal (CMD ou PowerShell) :
+
+```cmd
+netstat -an | findstr 11434
+```
+
+**Résultat attendu :**
+```
+TCP    0.0.0.0:11434         0.0.0.0:0              LISTENING
+```
+
+> ✅ **C'est bon !** Ollama écoute maintenant sur toutes les interfaces.
+> 
+> ❌ **Si vous voyez `127.0.0.1:11434`** → le PC n'a pas redémarré après le changement de variable d'environnement. Redémarrez le PC.
+
+#### E. Vérifier qu'Ollama répond
+
+```cmd
+curl http://localhost:11434/api/tags
+```
+## 7.2 Authentification par Refresh Tokens ##
+
+Juste avant on a une architecture en 3 couches isolées :
+```
+[Navigateur] ──► [Streamlit :8501] ──► [Intelligence API :8000] ──► [Data API :8001] ──► [Supabase]
+                    (vitrine)            (cerveau)                   (coffre-fort)
+```
+
+Grace  a Docker on a un mur d'enceinte : seul le port 8501 (Streamlit) est ouvert vers l'extérieur. Les APIs sont invisibles depuis le PC hôte.
+
+Mais il reste deux failles. C'est exactement ce que 7.2 et 7.3 viennent combler.
+
+7.2 — Authentification : "Qui a le droit d'entrer ?"
+
+Le problème actuel
+Ton mur Docker protège les APIs 8000 et 8001 du monde extérieur. Mais la porte d'entrée (Streamlit → 8000/chat) est grande ouverte. 
+Imagine une analogie : ton château hanté a de superbes remparts (Docker), mais la grande porte n'a pas de serrure. N'importe qui qui atteint le frontend peut envoyer des requêtes à ton cerveau LLM.
+
+Pourquoi c'est un problème concret ?
+- Coût / Abus : ton LLM (Ollama) consomme des ressources. Sans authentification, n'importe qui peut spammer /chat et faire tourner ton GPU à fond.
+- Contrôle d'accès : tu veux que seul un utilisateur connecté puisse discuter avec le chroniqueur.
+- Traçabilité : savoir qui fait quoi.
+
+Pourquoi des Refresh Tokens et pas juste un mot de passe ?
+
+C'est là que le sujet devient intéressant. Il y a deux clés, pas une :
+
+| Token | Durée de vie | Rôle | Analogie |
+|---|---|---|---|
+| **access_token** | **Courte** (ex. 15 min) | Prouve ton identité à chaque requête `/chat` | Un **bracelet de festival** valable une journée |
+| **refresh_token** | **Longue** (ex. 7 jours) | Sert à obtenir un nouveau access_token sans se reconnecter | Ta **carte d'identité** au vestiaire |
+
+Pourquoi cette complexité ? À cause d'un dilemme de sécurité :
+- Si on faisait UN SEUL token à longue durée : pratique (pas besoin de se reconnecter), mais dangereux — s'il est volé, le voleur a accès pendant 7 jours.
+- Si on faisait UN SEUL token à courte durée : sécurisé, mais pénible — l'utilisateur devrait retaper son mot de passe toutes les 15 minutes.
+
+La solution des 2 tokens combine le meilleur des deux mondes :
+```
+Connexion (login avec mot de passe)
+   │
+   └──► access_token (15 min) + refresh_token (7 jours)
+          │
+          ├── Chaque /chat utilise l'access_token
+          │
+          └── Quand l'access_token expire (au bout de 15 min) :
+                 → le refresh_token demande un NOUVEL access_token
+                 → SANS retaper le mot de passe
+```
+L'access_token court limite les dégâts en cas de vol (expire vite). Le refresh_token long évite de retaper le mot de passe sans arrêt. C'est le standard de l'industrie (OAuth2).
+
+```
+Streamlit                          Intelligence API
+   │                                     │
+   │  POST /auth/login (user+pass)       │
+   │────────────────────────────────────►│  vérifie les identifiants
+   │  ◄──── access_token + refresh_token │  (fabrique 2 JWT)
+   │                                     │
+   │  POST /chat  (Bearer access_token)  │
+   │────────────────────────────────────►│  middleware valide le JWT ✅
+   │                                     │
+   │  ... 15 min plus tard, access expiré │
+   │  POST /auth/refresh (refresh_token) │
+   │────────────────────────────────────►│  fabrique un NOUVEL access_token
+   │  ◄──────────── nouvel access_token  │
+```
+
+Les 3 pièces à construire (comme dit le sujet)
+1) POST /auth/login → tu envoies user+password, tu reçois les 2 tokens. (La serrure de la porte.)
+2) Intercepteur Streamlit → le frontend stocke les tokens et rafraîchit automatiquement en coulisses. (L'utilisateur ne voit rien, c'est transparent.)
+3) Middleware FastAPI → chaque appel à /chat vérifie « ce bracelet est-il valide ? ». Si non → 401. (Le videur à l'entrée.)
+
+Pourquoi "utilisateur unique via .env" ? Parce que le sujet dit clairement : c'est un projet de formation. Construire une vraie base de données d'utilisateurs (inscription, hachage bcrypt, récupération de mot de passe...) serait hors-sujet. On veut juste démontrer que tu maîtrises le mécanisme JWT, pas gérer 10 000 comptes.
+
+On va construire l'authentification en 4 briques, dans cet ordre logique :
+```
+┌─────────────────────────────────────────────────────────────┐
+│  ÉTAPE 1 : La config (.env + config.py)                      │
+│  → Définir l'utilisateur unique + les secrets JWT           │
+├─────────────────────────────────────────────────────────────┤
+│  ÉTAPE 2 : Le module auth (src/auth/security.py)             │
+│  → Fabriquer/valider les tokens (access + refresh)          │
+├─────────────────────────────────────────────────────────────┤
+│  ÉTAPE 3 : Les routes (POST /auth/login, /auth/refresh)      │
+│  → + protéger /chat avec une dépendance FastAPI             │
+├─────────────────────────────────────────────────────────────┤
+│  ÉTAPE 4 : L'intercepteur Streamlit (app_frontend.py)        │
+│  → Login + stockage tokens + refresh automatique            │
+└─────────────────────────────────────────────────────────────┘
+```
+On utilisera :
+- PyJWT = fabriquer les tokens (les « badges » une fois connecté).
+- bcrypt = stocker/vérifier le mot de passe sans le mettre en clair.
+
+
+### ÉTAPE 1 : La config (.env + config.py) 
+
+1) Installer les dépendances => ` uv add PyJWT bcrypt `
+2) Générer tes secrets (avec uv run) 
+   - La clé de signature JWT : 
+   dans l'environnement du projet ` uv run python -c "import secrets; print(secrets.token_hex(32))" `  
+   Copie le résultat → ira dans JWT_SECRET_KEY. => 19360c6f5dd8cf8cd986f7f50593aac2454ba081ca86382ae80a14fd72150c84
+   - Le hash bcrypt de ton mot de passe : ` uv run python -c "import bcrypt; print(bcrypt.hashpw('motdepasse123'.encode(), bcrypt.gensalt()).decode())" `   
+    On obtiendra un hash  $ 2b $ 12$... → à coller dans AUTH_PASSWORD_HASH => $2b$12$LxWJmxxqFrTbAEsCBK5LqOLwilyxqfsLNvKBi/jD59l4XUslMrC02
+3) Ajouter les variables dans .env et .env.example
+   - dans le .env :  
+        ```
+        # ── Authentification JWT (Phase 7.2) ──
+        JWT_SECRET_KEY=colle_ici_le_token_hex_généré_au_1-b-①
+        AUTH_USERNAME=admin
+        AUTH_PASSWORD_HASH='colle_ici_le_hash_bcrypt_généré_au_1-b-②'
+        ```
+   - dans le .env.example :
+        ```
+        # ═══════════════════════════════════════════════════════════
+        #  Authentification JWT (Phase 7.2) — OBLIGATOIRE
+        # ═══════════════════════════════════════════════════════════
+        # Clé secrète de signature des tokens (générer via :
+        #   python -c "import secrets; print(secrets.token_hex(32))")
+        JWT_SECRET_KEY=[GENERER-UNE-CLE-SECRETE-ALEATOIRE]
+
+        # Identifiant unique de l'utilisateur autorisé
+        AUTH_USERNAME=admin
+
+        # Hash bcrypt du mot de passe (générer via :
+        #   python -c "import bcrypt; print(bcrypt.hashpw('votre_mot_de_passe'.encode(), bcrypt.gensalt()).decode())")
+        AUTH_PASSWORD_HASH='[GENERER-UN-HASH-BCRYPT]'
+        ```
+    - dans le .env.docker rajouter 
+        ```
+        # ── Authentification JWT (Phase 7.2) ──
+        JWT_SECRET_KEY=colle_ici_le_token_hex_généré_au_1-b-①
+        AUTH_USERNAME=admin
+        AUTH_PASSWORD_HASH='colle_ici_le_hash_bcrypt_généré_au_1-b-②'
+        ACCESS_TOKEN_EXPIRE_MINUTES=15
+        REFRESH_TOKEN_EXPIRE_DAYS=7
+        ```
+4) Ajouter le bloc dans src/config.py
+    ```
+    # ═══════════════════════════════════════════════════════════════
+    # Authentification JWT (Phase 7.2)
+    # ═══════════════════════════════════════════════════════════════
+    # Système d'authentification par Refresh Tokens verrouillant les
+    # échanges entre l'IHM Streamlit et l'API Intelligence, tel qu'exigé
+    # par le cahier des charges (Épilogue MLOps, Couche Intelligence).
+    #
+    # Pour un projet de formation, un utilisateur UNIQUE est défini via
+    # ces variables d'environnement (pas de gestion multi-utilisateurs).
+    # ═══════════════════════════════════════════════════════════════
+
+    # Clé secrète servant à SIGNER les JWT (HMAC-SHA256).
+    # Doit rester strictement confidentielle : quiconque la connaît peut
+    # forger des tokens valides.
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "CHANGE_ME_EN_PRODUCTION")
+
+    # Algorithme de signature symétrique (le standard pour un secret unique).
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+
+    # Durée de vie de l'access_token en MINUTES (court : sécurité renforcée).
+    # Si volé, il n'est exploitable que quelques minutes.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15")
+    )
+
+    # Durée de vie du refresh_token en JOURS (long : confort utilisateur).
+    # Il permet de régénérer des access_token sans se reconnecter.
+    REFRESH_TOKEN_EXPIRE_DAYS: int = int(
+        os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7")
+    )
+
+    # Identifiant de l'unique utilisateur autorisé.
+    AUTH_USERNAME: str = os.getenv("AUTH_USERNAME", "admin")
+
+    # Hash bcrypt du mot de passe (JAMAIS le mot de passe en clair).
+    # La vérification se fait via bcrypt.checkpw().
+    AUTH_PASSWORD_HASH: str = os.getenv("AUTH_PASSWORD_HASH", "")
+    ```
+
+5) modifier le fichier "docker-compose.yml", ajouter "env_file" a tous les service :
+    ```
+    services:
+    # ── Service 1 : Data API ────────────────────────────────────────────────
+    data-api:
+        build:
+        context: .
+        dockerfile: docker/data_api.Dockerfile
+        image: horragor-data-api:1.0
+        container_name: horragor-data
+        pull_policy: never
+        env_file:
+        - .env.docker              # ← CHANGE .env → .env.docker
+        networks:
+        - horragor-net
+        restart: unless-stopped
+
+    # ── Service 2 : Intelligence API ────────────────────────────────────────
+    intelligence-api:
+        build:
+        context: .
+        dockerfile: docker/intelligence_api.Dockerfile
+        image: horragor-intelligence-api:1.0
+        container_name: horragor-ia
+        pull_policy: never
+        env_file:
+        - .env.docker              # ← ✅ BON
+        networks:
+        - horragor-net
+        depends_on:
+        - data-api
+        extra_hosts:
+        - "host.docker.internal:host-gateway"
+        environment:
+        - OLLAMA_BASE_URL=http://host.docker.internal:11434
+        restart: unless-stopped
+
+    # ── Service 3 : Frontend Streamlit ──────────────────────────────────────
+    frontend:
+        build:
+        context: .
+        dockerfile: docker/frontend.Dockerfile
+        image: horragor-frontend:latest
+        container_name: horragor-front
+        pull_policy: never
+        env_file:
+        - .env.docker              # ← AJOUTE CETTE LIGNE
+        ports:
+        - "8501:8501"
+        networks:
+        - horragor-net
+        depends_on:
+        - intelligence-api
+        environment:
+        - API_BASE_URL=http://horragor-ia:8000
+        restart: unless-stopped
+
+    networks:
+    horragor-net:
+        driver: bridge
+    ```
+
+6) relancer les containeurs
+    ```
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+    ```
+
+### ÉTAPE 2 : src/auth/security.py — le module qui fabrique et valide réellement les tokens. ##
+
+1) Crée l'arborescence
+   - src\auth\__init__.py
+   - src\auth\security.py avec son code
+2) Petit test rapide pour valider que tout s'importe bien : ` uv run python -c "from src.auth.security import create_access_token; print(create_access_token('horagor')[:40], '...')" `  
+Cela doit normalement afficher un début de token (eyJ...)
+
+### ÉTAPE 3 : Les routes /auth/login et /auth/refresh
+C'est ici qu'on branche security.py à FastAPI pour que le frontend puisse récupérer ses tokens.
+
+1) Crée l'arborescence
+   - src\api\__init__.py
+   - src\api\auth.py avec son code
+2) Enregistrer le routeur auth dans src/main.py
+   - Ajouter l'import (après les imports FastAPI)
+        ```
+        from __future__ import annotations
+        from datetime import datetime
+
+        import asyncio
+        import uuid
+        from langchain_core.messages import HumanMessage
+        from contextlib import asynccontextmanager
+        from typing import Any, AsyncGenerator
+        from fastapi import FastAPI, HTTPException, status, Depends
+        from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+        from pydantic import BaseModel, Field
+        from src.api.auth import router as auth_router
+        from src.auth.security import verify_access_token
+        ```
+   - Enregistre le routeur (après la création de l'app, avant ou après le lifespan)
+        ```
+        app = FastAPI(
+            title="HorRAGor API",
+            description="API backend multi-agent pour le chroniqueur de cinéma d'horreur.",
+            version="0.4.0",
+            lifespan=lifespan,
+        )
+
+        # Enregistre le routeur d'authentification  ← NOUVEAU
+        app.include_router(auth_router)
+        ```
+   -  Dans la fonction get_current_user (ligne ~130), remplacer :  
+        ` async def get_current_user(credentials: HTTPAuthCredentials = Depends(HTTPBearer())) -> str: `  
+        par  
+        ` async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())) -> str: `  
+   -  Ajoute APRÈS la création de l'app (ou à côté de ta route /chat existante) :
+        ```
+        # ═══════════════════════════════════════════════════════════════
+        # Route protégée par JWT (Phase 7.2)
+        # ═══════════════════════════════════════════════════════════════
+
+        @app.post("/chat")
+        async def chat(
+            message: str,
+            credentials: HTTPAuthCredentials = Depends(HTTPBearer()),
+            # ... autres paramètres existants (session_id, etc.)
+        ):
+            """
+            Endpoint protégé par JWT.
+            
+            Nécessite un header Authorization:
+                Authorization: Bearer {access_token}
+            
+            Le token est validé automatiquement via verify_access_token().
+            Si le token est invalide ou expiré → 401 Unauthorized.
+            """
+            try:
+                # Valide le token et récupère le username
+                username = verify_access_token(credentials.credentials)
+                print(f"✅ Utilisateur authentifié : {username}")
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Token invalide ou expiré : {str(e)}"
+                )
+            
+            # ← Ton code de chat existant commence ici
+            # ...
+        ```
+   -  Rebuild les conteneur : 
+        ```
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+        ```
+3) testes :
+   - Test 1 : vérifier que verify_access_token s'importe  
+    ` uv run python -c "from src.auth.security import verify_access_token; print('✅ verify_access_token importée avec succès')" `
+   - Test 2 : Login valide
+        ```
+        curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"motdepasse123\"}"
+        ```
+        Réponse attendue (200) :
+        ```
+        {
+        "access_token": "eyJhbGciOiJIUzI1NiIs...",
+        "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+        "token_type": "bearer"
+        }
+        ```
+   - Test 3 : Login invalide (mauvais mot de passe)
+        ```
+        curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"MAUVAIS\"}"
+
+        ```
+        Réponse attendue (401) :
+        ```
+        {
+        "detail": "Nom d'utilisateur ou mot de passe incorrect."
+        }
+        ```
+   - Test 4 : Refresh token
+        On récupère le refresh_token du test 1, puis :
+        ```
+        curl -X POST http://localhost:8000/auth/refresh -H "Content-Type: application/json" -d "{\"refresh_token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ...\"}"
+        ```
+        Réponse attendue (200) :
+        ```
+        {
+        "access_token": "eyJhbGciOiJIUzI1NiIs... (NOUVEAU)",
+        "refresh_token": "eyJhbGciOiJIUzI1NiIs... (INCHANGÉ)",
+        "token_type": "bearer"
+        }
+        ```
+
+
+   - Test 5 : Appel /chat SANS token (doit retourner 401)
+        ```
+        curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"Parle-moi de Saw\"}"
+        ```
+        Réponse attendue (401) :
+        ```
+        {
+        "detail": "Token invalide ou expiré : ..."
+        }
+        ```
+   - Test 6 : Appel /chat AVEC token (doit marcher)
+        ```
+        curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"motdepasse123\"}"
+
+        curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer TON_ACCESS_TOKEN_ICI" -d "{\"message\": \"Parle-moi de Saw\"}"
+        ```
+
+### ÉTAPE 4 — Sécuriser le frontend Streamlit ###
+Maintenant que le backend exige un token, ton Streamlit ne peut plus appeler /chat directement (il recevrait 401). Il faut :
+- Page de login dans Streamlit (username + password → appel /auth/login)
+- Stocker les tokens dans st.session_state
+- Ajouter le header Authorization: Bearer ... à chaque appel /chat
+- (Bonus) Refresh automatique quand l'access_token expire (au bout de 15 min)
+
+ Plan de transformation
+
+✅ Ajouter une page de login (à afficher avant le chat)  
+✅ Stocker access_token + refresh_token dans st.session_state  
+✅ Modifier call_chat_api() pour envoyer le header Authorization  
+✅ Ajouter un intercepteur de refresh (gestion du 401 + retry auto)  
+✅ Bouton de déconnexion  
+
+1) modifier app_frontend.py
+   - ajout de :
+
+        | Fonctionnalité | Code |
+        |---|---|
+        | 🔐 Login → `/auth/login` | `login()` |
+        | 🔄 Refresh auto → `/auth/refresh` | `refresh_access_token()` + intercepteur dans `call_chat_api()` |
+        | 📌 Stockage tokens | `st.session_state.access_token/refresh_token` |
+        | 🚪 Logout | `logout()` |
+        | 🔁 Retry 401 | `call_chat_api()` avec 2 tentatives |
+    
+   - faire :
+        ```
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+        ```
+
+   - tester : 
+       ouvrir http://localhost:8501
+
+        On devrait avoir :
+
+            ❌ Une page de login (pas le chat)  
+            Identifiant : admin  
+            Mot de passe : motdepasse123  
+
+            Après login :
+            ✅ Page de chat normale
+            ✅ Bouton "Se déconnecter" dans la sidebar
+
+
+2) Refresh automatique quand l'access_token expire (au bout de 15 min)
+Plan :
+   - Décoder le JWT pour extraire le timestamp exp (expiration)
+   - Vérifier l'expiration au début de chaque appel /chat
+   - Si le token expire dans moins de X secondes → refresh automatique
+   - Afficher l'expiration dans le sidebar (bonus UX)
+
+    Donc modifier app_fontend.py :
+    ```
+    app_frontend.py
+    ├── Imports (httpx, streamlit, etc.)
+    ├── st.set_page_config()  ← DOIT ÊTRE PREMIER
+    │
+    ├── ════════════════════════════════════════════
+    ├── UTILITAIRES JWT  ← 🔴 AJOUTER ICI
+    ├── ════════════════════════════════════════════
+    │   ├── decode_jwt_payload()
+    │   ├── get_token_expiration()
+    │   ├── is_token_expired_soon()
+    │   └── get_token_remaining_time()
+    │
+    ├── ════════════════════════════════════════════
+    ├── INITIALISATION SESSION STATE
+    ├── ════════════════════════════════════════════
+    │   └── init_session_state()
+    │
+    ├── ════════════════════════════════════════════
+    ├── AUTHENTIFICATION
+    ├── ════════════════════════════════════════════
+    │   ├── login()
+    │   ├── refresh_access_token()
+    │   └── logout()
+    │
+    ├── ════════════════════════════════════════════
+    ├── APPEL API  ← 🔴 MODIFIER ICI
+    ├── ════════════════════════════════════════════
+    │   └── call_chat_api()  ← Ajouter vérification proactive
+    │
+    ├── ════════════════════════════════════════════
+    ├── AFFICHAGE
+    ├── ════════════════════════════════════════════
+    │   ├── _render_source()
+    │   ├── display_chat_history()
+    │   └── handle_user_input()
+    │
+    ├── ════════════════════════════════════════════
+    ├── PAGE DE LOGIN
+    ├── ════════════════════════════════════════════
+    │   └── show_login_page()
+    │
+    ├── ════════════════════════════════════════════
+    ├── PAGE CHAT  ← 🔴 MODIFIER ICI (sidebar)
+    ├── ════════════════════════════════════════════
+    │   └── show_chat_page()
+    │
+    ├── ════════════════════════════════════════════
+    ├── POINT D'ENTRÉE
+    ├── ════════════════════════════════════════════
+    │   └── main()
+    │
+    └── if __name__ == "__main__": main()
+    ```
+
+   - faire :  
+        ```
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+        ```
+
+    - tester :  
+          ouvrir http://localhost:8501
+          Regarder dans le sidebar : tu dois voir ⏱️ 14m 32s (ou similaire)  
+          Chaque appel /chat vérifiera si le token expire dans < 5 min  
+          Si oui, refresh automatique avant même que ça échoue ! ✨  
+
+
+## 7.3 Communication chiffrée ##
+
+Le sujet dit : « L'interface utilisateur doit elle aussi être isolée dans son conteneur et assurer une communication chiffrée et sécurisée vers l'API d'IA. » => Direction précise : « vers l'API d'IA » (Streamlit → Intelligence API).
+
+Le problème actuel  
+Même avec l'authentification (7.2), tes tokens et tes messages voyagent en HTTP clair entre Streamlit et l'API.
+
+Analogie : tu as maintenant une serrure sur ta porte (7.2), mais tu cries ton mot de passe à voix haute dans la rue en entrant. Quelqu'un qui écoute (attaque Man-in-the-Middle) peut intercepter :
+- Ton mot de passe au moment du login.
+- Tes tokens (et donc se faire passer pour toi).
+- Le contenu de tes conversations.
+
+La solution : TLS (le "S" de HTTPS)  
+Le TLS chiffre tout ce qui circule sur le fil. Même si quelqu'un intercepte les paquets, il ne voit que du charabia illisible.
+```
+SANS TLS (http://) :   "password=dracula1897"   ← lisible par un espion
+AVEC TLS (https://) :  "x9$Kf#2@..."             ← charabia chiffré
+```
+
+L'objectif passer de :  
+` Streamlit  ──── HTTP (clair) ────►  API IA   ❌ Espionnable `  
+vers  
+` Streamlit  ──── HTTPS (TLS) ────►  API IA   ✅ Chiffré `
+
+Donc le flux a chiffrer:
+```
+Streamlit (app_frontend.py)
+   │  API_BASE_URL=http://horragor-ia:8000   ← à passer en https://
+   ▼
+Intelligence API (src/main.py sur port 8000)  ← à passer en TLS
+```
+
+Pourquoi "auto-signé" ou "reverse proxy local" suffit ?
+Voici la nuance importante que le sujet souligne :
+| Type de certificat | Qui le garantit ? | Usage |
+|---|---|---|
+| **Auto-signé** | Toi-même (ton PC) | Démo / formation ✅ |
+| **Certificat valide** (Let's Encrypt, etc.) | Une autorité de confiance reconnue | Vraie production 🏢 |
+
+Un certificat auto-signé chiffre tout aussi bien la communication. Sa seule "faiblesse" : le navigateur affiche un avertissement (« connexion non sécurisée ») car personne d'officiel ne garantit que tu es bien qui tu prétends être. Pour une démo locale, c'est parfaitement suffisant — le chiffrement fonctionne, c'est ce qui compte.
+
+C'est pour ça que le sujet demande explicitement de documenter que « la vraie production utiliserait un certificat valide ». On te teste sur ta compréhension, pas sur ta capacité à acheter un certificat.
+
+Les options proposées par le sujet
+1) Certificat auto-signé directement sur Uvicorn (le plus simple).
+2) Reverse proxy TLS (Traefik ou Nginx) : un conteneur supplémentaire qui gère le HTTPS et redirige vers tes APIs. Plus proche de la "vraie" production.
+
+On ne fera que le certificat auto-signé directement par uvicorn.
+
+Plan d'action :
+
+| # | Action | Fichier concerné |
+|---|---|---|
+| **1** | 🐍 Générer `cert.pem` + `key.pem` en Python | Nouveau : `scripts/generate_cert.py` |
+| **2** | 📁 Copier les certs + ajouter options TLS à Uvicorn | `intelligence_api.Dockerfile` |
+| **3** | 🔗 Passer `API_BASE_URL` en `https://` + accepter cert auto-signé | `docker-compose.yml` + `app_frontend.py` |
+| **4** | 📄 Documenter (prod = vrai certificat) | README |
+
+1) Générer le certificat
+
+    un certificat TLS est composé de 2 fichiers :
+    | Fichier | Rôle | Analogie |
+    |---|---|---|
+    | **`key.pem`** (clé privée) | Déchiffre les messages. **SECRET** 🔒 | Ta clé de maison (à ne jamais donner) |
+    | **`cert.pem`** (certificat public) | Prouve ton identité + chiffre. **PUBLIC** 📢 | Ta carte d'identité (montrable) |
+
+    Il faut distinguer 2 choses différentes :
+    | Étape | Rôle | Outil |
+    |---|---|---|
+    | **1. Générer** le certificat (`.pem`) | Créer les fichiers `key.pem` + `cert.pem` | OpenSSL (ou Python) |
+    | **2. Utiliser** le certificat | Uvicorn charge les fichiers et chiffre | Uvicorn |
+
+    Le fonctionnement : 
+      1. Streamlit se connecte à l'API
+      2. L'API montre son cert.pem (« voici mon identité »)
+      3. Streamlit chiffre les données avec la clé publique du cert
+      4. Seule l'API peut déchiffrer avec sa key.pem privée
+      5. ✅ Communication sécurisée établie
+
+    - Générer le certificat en Python  
+        ` uv pip install cryptography `  
+        ajouter le script dans " scripts/generate_cert.py "
+        Lance le script : ` python scripts/generate_cert.py `  
+        Vérifie que le dossier certs/ contient bien key.pem et cert.pem
+
+    Details importants :
+    - Le Common Name = horragor-ia => C'est crucial que le  docker-compose.yml, Streamlit appelle l'API via : ` API_BASE_URL=http://horragor-ia:8000 `. Le certificat doit correspondre à ce nom horragor-ia, sinon la validation TLS échoue.
+    - Les SAN (Subject Alternative Names) => On ajouté horragor-ia et localhost pour que ça marche : En Docker (via horragor-ia) et En local dev (via localhost)
+
+2) Configurer Uvicorn en HTTPS  
+   - On modifie " docker/intelligence_api.Dockerfile"  pour que sa commande de lancement charge le certificat :
+       ```
+       CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", \
+           "--ssl-keyfile", "/app/certs/key.pem", \
+           "--ssl-certfile", "/app/certs/cert.pem"]
+       ```
+   - On modifie "docker-compose.yml" :  
+       1) Ajouter le volume certs car on a choisi la stratégie B (volume monté) : le certificat n'est PAS dans l'image Docker, il est "branché" au démarrage depuis ton PC.
+           ```
+           volumes:
+           - ./certs:/app/certs:ro
+           ```
+           - ./certs = le dossier sur ton PC (celui qui contient key.pem + cert.pem)  
+           - /app/certs = où ces fichiers apparaissent DANS le conteneur (c'est le chemin que ton Dockerfile utilise : /app/certs/key.pem)  
+           - :ro = read-only (le conteneur peut lire mais pas modifier → sécurité)  
+
+           👉 Le lien avec ton Dockerfile : ta commande CMD cherche /app/certs/key.pem. Ce volume est ce qui remplit ce dossier /app/certs. Sans lui, le fichier n'existe pas → Uvicorn plante au démarrage.
+
+       2) Passer API_BASE_URL en https://  
+           Dans le service frontend, Streamlit appelle l'API. Comme l'API est maintenant en HTTPS, l'URL doit changer :
+           ```
+           # AVANT
+           - API_BASE_URL=http://horragor-ia:8000
+           # APRÈS
+           - API_BASE_URL=https://horragor-ia:8000
+           ```
+   - Il y a un piège classique qui va arriver : ton certificat est auto-signé. Quand Streamlit (via httpx) va appeler https://horragor-ia:8000, httpx va refuser le certificat par défaut avec une erreur du type : `
+   httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] `. C'est normal et attendu : httpx ne fait pas confiance à un certificat qu'aucune autorité officielle n'a signé. On réglera ça à l'étape 3 dans app_frontend.py en disant à httpx de faire confiance à TON cert.pem (le bon comportement) — on n'utilisera PAS verify=False (mauvaise pratique).
+
+3) Configurer httpx dans app_frontend.py pour qu'il fasse confiance à ton certificat.
+
+- créer le client httpx à 3 endroits :
+    ```
+    with httpx.Client(timeout=API_TIMEOUT) as client:   # dans login()
+    with httpx.Client(timeout=API_TIMEOUT) as client:   # dans refresh_access_token()
+    with httpx.Client(timeout=API_TIMEOUT) as client:   # dans call_chat_api()
+    ```
+- dire à httpx de faire confiance à TON cert.pem  
+    Le paramètre verify= de httpx.Client accepte un chemin vers un certificat de confiance. On lui passe ton cert.pem.
+
+    Ajouter une constante en haut du fichier :
+    ```
+    import os
+
+    # 🔒 Certificat auto-signé de l'API Intelligence (TLS, Phase 7.3).
+    # httpx doit faire confiance à CE certificat précis (pas verify=False !).
+    # Chemin dans le conteneur frontend → à monter via volume dans docker-compose.
+    SSL_VERIFY = os.getenv("SSL_CERT_PATH", "/app/certs/cert.pem")
+    ```
+- Ajouter verify=SSL_VERIFY aux 3 clients 
+` with httpx.Client(timeout=API_TIMEOUT, verify=SSL_VERIFY) as client: `
+
+- Conséquence importante : le frontend a AUSSI besoin du cert  
+    Le conteneur frontend doit accéder à /app/certs/cert.pem. Il faut donc monter le même volume sur le service frontend dans docker-compose.yml :
+    ```
+    frontend:
+        ...
+        environment:
+        - API_BASE_URL=https://horragor-ia:8000
+        - SSL_CERT_PATH=/app/certs/cert.pem
+        volumes:
+        - ./certs:/app/certs:ro
+    ```
+
+- lancer : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build `  
+    et verifier les logs ` docker logs horragor-ia | tail -20 `  
+    On devra voir Uvicorn running on https://0.0.0.0:8000 (le https confirme que TLS est actif ✅).
+
+- Ouvrir  http://localhost:8501 et teste le login :  
+    Identifiant : admin  
+    Mot de passe : motdepasse123
+
+- Vérification :  
+` docker logs -f horragor-ia ` on doit voir 
+` INFO:     Uvicorn running on https://0.0.0.0:8000 `
+
+Sreamlit lui-même reste en HTTP (:8501), ce qui est normal. Voici pourquoi :
+```
+┌─────────────────┐
+│  Navigateur     │
+│  (sur ton PC)   │
+└────────┬────────┘
+         │
+         │ HTTP (normal, pas HTTPS)
+         ↓
+┌─────────────────────────────┐
+│  Streamlit Frontend         │
+│  http://localhost:8501      │ ← C'est bon comme ça
+│  (conteneur horragor-front) │
+└─────────┬───────────────────┘
+          │
+          │ HTTPS (certificat auto-signé)
+          │ Communication interne au réseau Docker
+          ↓
+┌─────────────────────────────┐
+│  Intelligence API (Uvicorn) │
+│  https://horragor-ia:8000   │ ← C'est ça qui est en HTTPS
+│  (conteneur horragor-ia)    │
+└─────────────────────────────┘
+```
+Streamlit n'a pas besoin d'être en HTTPS parce que :
+- C'est une application locale (sur ta machine)
+- Le navigateur accède via localhost (réseau local)
+- La sécurité TLS se fait entre les conteneurs Docker (réseau interne)
+
+Le certificat auto-signé (cert.pem) est uniquement pour l'API Intelligence (communication conteneur-à-conteneur).

@@ -97,11 +97,22 @@ htmlcov/
 # Environment Secrets
 # ==============================================
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# ==============================================
+# Certificats TLS (Phase 7.3)
+# ==============================================
+# La clé privée (key.pem) et le certificat auto-signé (cert.pem) ne
+# doivent JAMAIS être versionnés : ce sont des secrets locaux, régénérables
+# à tout moment via `python scripts/generate_cert.py`.
+certs/
+*.pem
+*.key
+*.crt
 
 # ==============================================
 # Jupyter
