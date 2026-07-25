@@ -13,9 +13,11 @@ import uuid
 from langchain_core.messages import HumanMessage
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
-
+from src.api.auth import router as auth_router
+from src.auth.security import verify_access_token
 
 # ═══════════════════════════════════════════════════════════════
 # MODÈLES PYDANTIC — Contrat d'entrée/sortie de l'API
@@ -105,9 +107,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Enregistre le routeur d'authentification  ← NOUVEAU
+app.include_router(auth_router)
+
 
 # ═══════════════════════════════════════════════════════════════
-# ENDPOINT PRINCIPAL
+# DÉPENDANCE DE SÉCURITÉ — Valide le JWT automatiquement
+# ═══════════════════════════════════════════════════════════════
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())) -> str:
+    """Valide le token JWT et retourne le username.
+    
+    Lève 401 automatiquement si le token est manquant ou invalide.
+    """
+    try:
+        username = verify_access_token(credentials.credentials)
+        return username
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token invalide ou expiré : {str(e)}"
+        )
+
+# ═══════════════════════════════════════════════════════════════
+# ENDPOINT PRINCIPAL (Protégé par JWT - Phase 7.2)
 # ═══════════════════════════════════════════════════════════════
 
 @app.post(
@@ -116,26 +139,34 @@ app = FastAPI(
     status_code=status.HTTP_200_OK,
     summary="Interroge l'agent HorRAGor sur un film d'horreur.",
 )
-async def chat_endpoint(payload: ChatRequest) -> ChatResponse:
+async def chat_endpoint(
+    payload: ChatRequest,
+    username: str = Depends(get_current_user),  # ← UTILISE LA DÉPENDANCE
+) -> ChatResponse:
     """Traite une requête utilisateur via le graphe multi-agent.
 
-    Le graphe exécute séquentiellement :
-        rag_node → router → [scraper_node] → narration_node.
+    🔐 **AUTHENTIFICATION (Phase 7.2)**
+    Nécessite un header Authorization avec un access_token valide :
+        Authorization: Bearer {access_token}
 
     Le thread_id permet de reprendre une conversation si le client le
     renvoie, grâce au checkpointer MemorySaver configuré dans pipeline.py.
 
     Args:
         payload: Modèle validé contenant le message et le thread_id optionnel.
+        username: Identité extraite du token JWT valide (injection automatique).
 
     Returns:
         ChatResponse avec la chronique, les sources et l'indicateur web.
 
     Raises:
-        HTTPException: 503 si le graphe n'est pas initialisé,
+        HTTPException: 401 si le token est invalide ou expiré,
+            503 si le graphe n'est pas initialisé,
             500 si le graphe lève une exception non gérée.
     """
     global _compiled_graph
+
+    print(f"✅ Utilisateur authentifié : {username}")
 
     # --- 1. Vérification de l'état du graphe ---
     if _compiled_graph is None:
@@ -145,7 +176,6 @@ async def chat_endpoint(payload: ChatRequest) -> ChatResponse:
         )
 
     # --- 2. Préparation de l'état initial ---
-    # On génère un thread_id unique si le client n'en fournit pas.
     thread_id = payload.thread_id or str(uuid.uuid4())
 
     from src.models.state import AgentState
@@ -158,36 +188,31 @@ async def chat_endpoint(payload: ChatRequest) -> ChatResponse:
         "needs_enrichment": None,
         "final_answer": None,
         "sources": None,
-        "metadata": {"session_id": str(uuid.uuid4())},
+        "metadata": {"session_id": str(uuid.uuid4()), "username": username},
     }
 
     config = {"configurable": {"thread_id": thread_id}}
 
     # --- 3. Invocation du graphe (hors du thread async principal) ---
     try:
-        # graph.invoke est bloquant (I/O CPU avec Ollama).
-        # to_thread évite de figer le serveur FastAPI pendant la génération.
         final_state: AgentState = await asyncio.to_thread(
             _compiled_graph.invoke,
             initial_state,
             config,
         )
     except Exception as exc:
-        # Toute erreur dans le pipeline (Ollama down, bug de node, etc.)
-        # est capturée et renvoyée proprement au client.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Échec du traitement agentique : {exc}",
         ) from exc
 
     # --- 4. Extraction des sources pour le client ---
-    # On reconstitue une liste propre à partir de rag_results et scraped_data.
     sources: list[dict[str, Any]] = []
     used_web = False
 
     rag_results = final_state.get("rag_results") or {}
 
-    # 4-a. Sources vectorielles (FAISS
+    # 4-a. Sources vectorielles (FAISS)
     faiss_hits = rag_results.get("faiss", {}).get("hits", []) if isinstance(rag_results, dict) else []
     for hit in faiss_hits:
         meta = hit.get("metadata", {})

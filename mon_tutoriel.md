@@ -1397,6 +1397,7 @@ Le frontend Streamlit est le plus simple des trois conteneurs : il n'a besoin qu
 ## docker-compose.yml ##
 ### 1. Placement des fichiers
 Placez les deux fichiers docker-compose.yml (base) et docker-compose.dev.yml (override) dans le même répertoire que vos fichiers d'environnement :
+```
 📁 votre-projet/
 ├── docker-compose.yml           ← configuration "Sujet" / Production
 ├── docker-compose.dev.yml       ← override développement (ports API temporaires)
@@ -1407,7 +1408,7 @@ Placez les deux fichiers docker-compose.yml (base) et docker-compose.dev.yml (ov
 │   ├── intelligence_api.Dockerfile
 │   └── frontend.Dockerfile
 ├── data_api/                    ← code source Data API
-
+```
 
 ### 2. Principe de sécurité du réseau
 Conformément aux exigences du projet, l'architecture réseau suit cette règle stricte :
@@ -1575,3 +1576,547 @@ TCP    0.0.0.0:11434         0.0.0.0:0              LISTENING
 ```cmd
 curl http://localhost:11434/api/tags
 ```
+## 7.2 Authentification par Refresh Tokens ##
+
+Juste avant on a une architecture en 3 couches isolées :
+```
+[Navigateur] ──► [Streamlit :8501] ──► [Intelligence API :8000] ──► [Data API :8001] ──► [Supabase]
+                    (vitrine)            (cerveau)                   (coffre-fort)
+```
+
+Grace  a Docker on a un mur d'enceinte : seul le port 8501 (Streamlit) est ouvert vers l'extérieur. Les APIs sont invisibles depuis le PC hôte.
+
+Mais il reste deux failles. C'est exactement ce que 7.2 et 7.3 viennent combler.
+
+7.2 — Authentification : "Qui a le droit d'entrer ?"
+
+Le problème actuel
+Ton mur Docker protège les APIs 8000 et 8001 du monde extérieur. Mais la porte d'entrée (Streamlit → 8000/chat) est grande ouverte. 
+Imagine une analogie : ton château hanté a de superbes remparts (Docker), mais la grande porte n'a pas de serrure. N'importe qui qui atteint le frontend peut envoyer des requêtes à ton cerveau LLM.
+
+Pourquoi c'est un problème concret ?
+- Coût / Abus : ton LLM (Ollama) consomme des ressources. Sans authentification, n'importe qui peut spammer /chat et faire tourner ton GPU à fond.
+- Contrôle d'accès : tu veux que seul un utilisateur connecté puisse discuter avec le chroniqueur.
+- Traçabilité : savoir qui fait quoi.
+
+Pourquoi des Refresh Tokens et pas juste un mot de passe ?
+
+C'est là que le sujet devient intéressant. Il y a deux clés, pas une :
+
+| Token | Durée de vie | Rôle | Analogie |
+|---|---|---|---|
+| **access_token** | **Courte** (ex. 15 min) | Prouve ton identité à chaque requête `/chat` | Un **bracelet de festival** valable une journée |
+| **refresh_token** | **Longue** (ex. 7 jours) | Sert à obtenir un nouveau access_token sans se reconnecter | Ta **carte d'identité** au vestiaire |
+
+Pourquoi cette complexité ? À cause d'un dilemme de sécurité :
+- Si on faisait UN SEUL token à longue durée : pratique (pas besoin de se reconnecter), mais dangereux — s'il est volé, le voleur a accès pendant 7 jours.
+- Si on faisait UN SEUL token à courte durée : sécurisé, mais pénible — l'utilisateur devrait retaper son mot de passe toutes les 15 minutes.
+
+La solution des 2 tokens combine le meilleur des deux mondes :
+```
+Connexion (login avec mot de passe)
+   │
+   └──► access_token (15 min) + refresh_token (7 jours)
+          │
+          ├── Chaque /chat utilise l'access_token
+          │
+          └── Quand l'access_token expire (au bout de 15 min) :
+                 → le refresh_token demande un NOUVEL access_token
+                 → SANS retaper le mot de passe
+```
+L'access_token court limite les dégâts en cas de vol (expire vite). Le refresh_token long évite de retaper le mot de passe sans arrêt. C'est le standard de l'industrie (OAuth2).
+
+```
+Streamlit                          Intelligence API
+   │                                     │
+   │  POST /auth/login (user+pass)       │
+   │────────────────────────────────────►│  vérifie les identifiants
+   │  ◄──── access_token + refresh_token │  (fabrique 2 JWT)
+   │                                     │
+   │  POST /chat  (Bearer access_token)  │
+   │────────────────────────────────────►│  middleware valide le JWT ✅
+   │                                     │
+   │  ... 15 min plus tard, access expiré │
+   │  POST /auth/refresh (refresh_token) │
+   │────────────────────────────────────►│  fabrique un NOUVEL access_token
+   │  ◄──────────── nouvel access_token  │
+```
+
+Les 3 pièces à construire (comme dit le sujet)
+1) POST /auth/login → tu envoies user+password, tu reçois les 2 tokens. (La serrure de la porte.)
+2) Intercepteur Streamlit → le frontend stocke les tokens et rafraîchit automatiquement en coulisses. (L'utilisateur ne voit rien, c'est transparent.)
+3) Middleware FastAPI → chaque appel à /chat vérifie « ce bracelet est-il valide ? ». Si non → 401. (Le videur à l'entrée.)
+
+Pourquoi "utilisateur unique via .env" ? Parce que le sujet dit clairement : c'est un projet de formation. Construire une vraie base de données d'utilisateurs (inscription, hachage bcrypt, récupération de mot de passe...) serait hors-sujet. On veut juste démontrer que tu maîtrises le mécanisme JWT, pas gérer 10 000 comptes.
+
+On va construire l'authentification en 4 briques, dans cet ordre logique :
+```
+┌─────────────────────────────────────────────────────────────┐
+│  ÉTAPE 1 : La config (.env + config.py)                      │
+│  → Définir l'utilisateur unique + les secrets JWT           │
+├─────────────────────────────────────────────────────────────┤
+│  ÉTAPE 2 : Le module auth (src/auth/security.py)             │
+│  → Fabriquer/valider les tokens (access + refresh)          │
+├─────────────────────────────────────────────────────────────┤
+│  ÉTAPE 3 : Les routes (POST /auth/login, /auth/refresh)      │
+│  → + protéger /chat avec une dépendance FastAPI             │
+├─────────────────────────────────────────────────────────────┤
+│  ÉTAPE 4 : L'intercepteur Streamlit (app_frontend.py)        │
+│  → Login + stockage tokens + refresh automatique            │
+└─────────────────────────────────────────────────────────────┘
+```
+On utilisera :
+- PyJWT = fabriquer les tokens (les « badges » une fois connecté).
+- bcrypt = stocker/vérifier le mot de passe sans le mettre en clair.
+
+
+### ÉTAPE 1 : La config (.env + config.py) 
+
+1) Installer les dépendances => ` uv add PyJWT bcrypt `
+2) Générer tes secrets (avec uv run) 
+   - La clé de signature JWT : 
+   dans l'environnement du projet ` uv run python -c "import secrets; print(secrets.token_hex(32))" `  
+   Copie le résultat → ira dans JWT_SECRET_KEY. => 19360c6f5dd8cf8cd986f7f50593aac2454ba081ca86382ae80a14fd72150c84
+   - Le hash bcrypt de ton mot de passe : ` uv run python -c "import bcrypt; print(bcrypt.hashpw('motdepasse123'.encode(), bcrypt.gensalt()).decode())" `   
+    On obtiendra un hash  $ 2b $ 12$... → à coller dans AUTH_PASSWORD_HASH => $2b$12$LxWJmxxqFrTbAEsCBK5LqOLwilyxqfsLNvKBi/jD59l4XUslMrC02
+3) Ajouter les variables dans .env et .env.example
+   - dans le .env :  
+        ```
+        # ── Authentification JWT (Phase 7.2) ──
+        JWT_SECRET_KEY=colle_ici_le_token_hex_généré_au_1-b-①
+        AUTH_USERNAME=admin
+        AUTH_PASSWORD_HASH='colle_ici_le_hash_bcrypt_généré_au_1-b-②'
+        ```
+   - dans le .env.example :
+        ```
+        # ═══════════════════════════════════════════════════════════
+        #  Authentification JWT (Phase 7.2) — OBLIGATOIRE
+        # ═══════════════════════════════════════════════════════════
+        # Clé secrète de signature des tokens (générer via :
+        #   python -c "import secrets; print(secrets.token_hex(32))")
+        JWT_SECRET_KEY=[GENERER-UNE-CLE-SECRETE-ALEATOIRE]
+
+        # Identifiant unique de l'utilisateur autorisé
+        AUTH_USERNAME=admin
+
+        # Hash bcrypt du mot de passe (générer via :
+        #   python -c "import bcrypt; print(bcrypt.hashpw('votre_mot_de_passe'.encode(), bcrypt.gensalt()).decode())")
+        AUTH_PASSWORD_HASH='[GENERER-UN-HASH-BCRYPT]'
+        ```
+    - dans le .env.docker rajouter 
+        ```
+        # ── Authentification JWT (Phase 7.2) ──
+        JWT_SECRET_KEY=colle_ici_le_token_hex_généré_au_1-b-①
+        AUTH_USERNAME=admin
+        AUTH_PASSWORD_HASH='colle_ici_le_hash_bcrypt_généré_au_1-b-②'
+        ACCESS_TOKEN_EXPIRE_MINUTES=15
+        REFRESH_TOKEN_EXPIRE_DAYS=7
+        ```
+4) Ajouter le bloc dans src/config.py
+    ```
+    # ═══════════════════════════════════════════════════════════════
+    # Authentification JWT (Phase 7.2)
+    # ═══════════════════════════════════════════════════════════════
+    # Système d'authentification par Refresh Tokens verrouillant les
+    # échanges entre l'IHM Streamlit et l'API Intelligence, tel qu'exigé
+    # par le cahier des charges (Épilogue MLOps, Couche Intelligence).
+    #
+    # Pour un projet de formation, un utilisateur UNIQUE est défini via
+    # ces variables d'environnement (pas de gestion multi-utilisateurs).
+    # ═══════════════════════════════════════════════════════════════
+
+    # Clé secrète servant à SIGNER les JWT (HMAC-SHA256).
+    # Doit rester strictement confidentielle : quiconque la connaît peut
+    # forger des tokens valides.
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "CHANGE_ME_EN_PRODUCTION")
+
+    # Algorithme de signature symétrique (le standard pour un secret unique).
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+
+    # Durée de vie de l'access_token en MINUTES (court : sécurité renforcée).
+    # Si volé, il n'est exploitable que quelques minutes.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15")
+    )
+
+    # Durée de vie du refresh_token en JOURS (long : confort utilisateur).
+    # Il permet de régénérer des access_token sans se reconnecter.
+    REFRESH_TOKEN_EXPIRE_DAYS: int = int(
+        os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7")
+    )
+
+    # Identifiant de l'unique utilisateur autorisé.
+    AUTH_USERNAME: str = os.getenv("AUTH_USERNAME", "admin")
+
+    # Hash bcrypt du mot de passe (JAMAIS le mot de passe en clair).
+    # La vérification se fait via bcrypt.checkpw().
+    AUTH_PASSWORD_HASH: str = os.getenv("AUTH_PASSWORD_HASH", "")
+    ```
+
+5) modifier le fichier "docker-compose.yml", ajouter "env_file" a tous les service :
+    ```
+    services:
+    # ── Service 1 : Data API ────────────────────────────────────────────────
+    data-api:
+        build:
+        context: .
+        dockerfile: docker/data_api.Dockerfile
+        image: horragor-data-api:1.0
+        container_name: horragor-data
+        pull_policy: never
+        env_file:
+        - .env.docker              # ← CHANGE .env → .env.docker
+        networks:
+        - horragor-net
+        restart: unless-stopped
+
+    # ── Service 2 : Intelligence API ────────────────────────────────────────
+    intelligence-api:
+        build:
+        context: .
+        dockerfile: docker/intelligence_api.Dockerfile
+        image: horragor-intelligence-api:1.0
+        container_name: horragor-ia
+        pull_policy: never
+        env_file:
+        - .env.docker              # ← ✅ BON
+        networks:
+        - horragor-net
+        depends_on:
+        - data-api
+        extra_hosts:
+        - "host.docker.internal:host-gateway"
+        environment:
+        - OLLAMA_BASE_URL=http://host.docker.internal:11434
+        restart: unless-stopped
+
+    # ── Service 3 : Frontend Streamlit ──────────────────────────────────────
+    frontend:
+        build:
+        context: .
+        dockerfile: docker/frontend.Dockerfile
+        image: horragor-frontend:latest
+        container_name: horragor-front
+        pull_policy: never
+        env_file:
+        - .env.docker              # ← AJOUTE CETTE LIGNE
+        ports:
+        - "8501:8501"
+        networks:
+        - horragor-net
+        depends_on:
+        - intelligence-api
+        environment:
+        - API_BASE_URL=http://horragor-ia:8000
+        restart: unless-stopped
+
+    networks:
+    horragor-net:
+        driver: bridge
+    ```
+
+6) relancer les containeurs
+    ```
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+    docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+    ```
+
+### ÉTAPE 2 : src/auth/security.py — le module qui fabrique et valide réellement les tokens. ##
+
+1) Crée l'arborescence
+   - src\auth\__init__.py
+   - src\auth\security.py avec son code
+2) Petit test rapide pour valider que tout s'importe bien : ` uv run python -c "from src.auth.security import create_access_token; print(create_access_token('horagor')[:40], '...')" `  
+Cela doit normalement afficher un début de token (eyJ...)
+
+### ÉTAPE 3 : Les routes /auth/login et /auth/refresh
+C'est ici qu'on branche security.py à FastAPI pour que le frontend puisse récupérer ses tokens.
+
+1) Crée l'arborescence
+   - src\api\__init__.py
+   - src\api\auth.py avec son code
+2) Enregistrer le routeur auth dans src/main.py
+   - Ajouter l'import (après les imports FastAPI)
+        ```
+        from __future__ import annotations
+        from datetime import datetime
+
+        import asyncio
+        import uuid
+        from langchain_core.messages import HumanMessage
+        from contextlib import asynccontextmanager
+        from typing import Any, AsyncGenerator
+        from fastapi import FastAPI, HTTPException, status, Depends
+        from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+        from pydantic import BaseModel, Field
+        from src.api.auth import router as auth_router
+        from src.auth.security import verify_access_token
+        ```
+   - Enregistre le routeur (après la création de l'app, avant ou après le lifespan)
+        ```
+        app = FastAPI(
+            title="HorRAGor API",
+            description="API backend multi-agent pour le chroniqueur de cinéma d'horreur.",
+            version="0.4.0",
+            lifespan=lifespan,
+        )
+
+        # Enregistre le routeur d'authentification  ← NOUVEAU
+        app.include_router(auth_router)
+        ```
+   -  Dans la fonction get_current_user (ligne ~130), remplacer :  
+        ` async def get_current_user(credentials: HTTPAuthCredentials = Depends(HTTPBearer())) -> str: `  
+        par  
+        ` async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer())) -> str: `  
+   -  Ajoute APRÈS la création de l'app (ou à côté de ta route /chat existante) :
+        ```
+        # ═══════════════════════════════════════════════════════════════
+        # Route protégée par JWT (Phase 7.2)
+        # ═══════════════════════════════════════════════════════════════
+
+        @app.post("/chat")
+        async def chat(
+            message: str,
+            credentials: HTTPAuthCredentials = Depends(HTTPBearer()),
+            # ... autres paramètres existants (session_id, etc.)
+        ):
+            """
+            Endpoint protégé par JWT.
+            
+            Nécessite un header Authorization:
+                Authorization: Bearer {access_token}
+            
+            Le token est validé automatiquement via verify_access_token().
+            Si le token est invalide ou expiré → 401 Unauthorized.
+            """
+            try:
+                # Valide le token et récupère le username
+                username = verify_access_token(credentials.credentials)
+                print(f"✅ Utilisateur authentifié : {username}")
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Token invalide ou expiré : {str(e)}"
+                )
+            
+            # ← Ton code de chat existant commence ici
+            # ...
+        ```
+   -  Rebuild les conteneur : 
+        ```
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+        ```
+3) testes :
+   - Test 1 : vérifier que verify_access_token s'importe  
+    ` uv run python -c "from src.auth.security import verify_access_token; print('✅ verify_access_token importée avec succès')" `
+   - Test 2 : Login valide
+        ```
+        curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"motdepasse123\"}"
+        ```
+        Réponse attendue (200) :
+        ```
+        {
+        "access_token": "eyJhbGciOiJIUzI1NiIs...",
+        "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+        "token_type": "bearer"
+        }
+        ```
+   - Test 3 : Login invalide (mauvais mot de passe)
+        ```
+        curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"MAUVAIS\"}"
+
+        ```
+        Réponse attendue (401) :
+        ```
+        {
+        "detail": "Nom d'utilisateur ou mot de passe incorrect."
+        }
+        ```
+   - Test 4 : Refresh token
+        On récupère le refresh_token du test 1, puis :
+        ```
+        curl -X POST http://localhost:8000/auth/refresh -H "Content-Type: application/json" -d "{\"refresh_token\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ...\"}"
+        ```
+        Réponse attendue (200) :
+        ```
+        {
+        "access_token": "eyJhbGciOiJIUzI1NiIs... (NOUVEAU)",
+        "refresh_token": "eyJhbGciOiJIUzI1NiIs... (INCHANGÉ)",
+        "token_type": "bearer"
+        }
+        ```
+
+
+   - Test 5 : Appel /chat SANS token (doit retourner 401)
+        ```
+        curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d "{\"message\": \"Parle-moi de Saw\"}"
+        ```
+        Réponse attendue (401) :
+        ```
+        {
+        "detail": "Token invalide ou expiré : ..."
+        }
+        ```
+   - Test 6 : Appel /chat AVEC token (doit marcher)
+        ```
+        curl -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\": \"admin\", \"password\": \"motdepasse123\"}"
+
+        curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer TON_ACCESS_TOKEN_ICI" -d "{\"message\": \"Parle-moi de Saw\"}"
+        ```
+
+### ÉTAPE 4 — Sécuriser le frontend Streamlit ###
+Maintenant que le backend exige un token, ton Streamlit ne peut plus appeler /chat directement (il recevrait 401). Il faut :
+- Page de login dans Streamlit (username + password → appel /auth/login)
+- Stocker les tokens dans st.session_state
+- Ajouter le header Authorization: Bearer ... à chaque appel /chat
+- (Bonus) Refresh automatique quand l'access_token expire (au bout de 15 min)
+
+ Plan de transformation
+
+✅ Ajouter une page de login (à afficher avant le chat)  
+✅ Stocker access_token + refresh_token dans st.session_state  
+✅ Modifier call_chat_api() pour envoyer le header Authorization  
+✅ Ajouter un intercepteur de refresh (gestion du 401 + retry auto)  
+✅ Bouton de déconnexion  
+
+1) modifier app_frontend.py
+   - ajout de :
+
+        | Fonctionnalité | Code |
+        |---|---|
+        | 🔐 Login → `/auth/login` | `login()` |
+        | 🔄 Refresh auto → `/auth/refresh` | `refresh_access_token()` + intercepteur dans `call_chat_api()` |
+        | 📌 Stockage tokens | `st.session_state.access_token/refresh_token` |
+        | 🚪 Logout | `logout()` |
+        | 🔁 Retry 401 | `call_chat_api()` avec 2 tentatives |
+    
+   - faire :
+        ```
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+        ```
+
+   - tester : 
+       ouvrir http://localhost:8501
+
+        On devrait avoir :
+
+            ❌ Une page de login (pas le chat)  
+            Identifiant : admin  
+            Mot de passe : motdepasse123  
+
+            Après login :
+            ✅ Page de chat normale
+            ✅ Bouton "Se déconnecter" dans la sidebar
+
+
+2) Refresh automatique quand l'access_token expire (au bout de 15 min)
+Plan :
+   - Décoder le JWT pour extraire le timestamp exp (expiration)
+   - Vérifier l'expiration au début de chaque appel /chat
+   - Si le token expire dans moins de X secondes → refresh automatique
+   - Afficher l'expiration dans le sidebar (bonus UX)
+
+    Donc modifier app_fontend.py :
+    ```
+    app_frontend.py
+    ├── Imports (httpx, streamlit, etc.)
+    ├── st.set_page_config()  ← DOIT ÊTRE PREMIER
+    │
+    ├── ════════════════════════════════════════════
+    ├── UTILITAIRES JWT  ← 🔴 AJOUTER ICI
+    ├── ════════════════════════════════════════════
+    │   ├── decode_jwt_payload()
+    │   ├── get_token_expiration()
+    │   ├── is_token_expired_soon()
+    │   └── get_token_remaining_time()
+    │
+    ├── ════════════════════════════════════════════
+    ├── INITIALISATION SESSION STATE
+    ├── ════════════════════════════════════════════
+    │   └── init_session_state()
+    │
+    ├── ════════════════════════════════════════════
+    ├── AUTHENTIFICATION
+    ├── ════════════════════════════════════════════
+    │   ├── login()
+    │   ├── refresh_access_token()
+    │   └── logout()
+    │
+    ├── ════════════════════════════════════════════
+    ├── APPEL API  ← 🔴 MODIFIER ICI
+    ├── ════════════════════════════════════════════
+    │   └── call_chat_api()  ← Ajouter vérification proactive
+    │
+    ├── ════════════════════════════════════════════
+    ├── AFFICHAGE
+    ├── ════════════════════════════════════════════
+    │   ├── _render_source()
+    │   ├── display_chat_history()
+    │   └── handle_user_input()
+    │
+    ├── ════════════════════════════════════════════
+    ├── PAGE DE LOGIN
+    ├── ════════════════════════════════════════════
+    │   └── show_login_page()
+    │
+    ├── ════════════════════════════════════════════
+    ├── PAGE CHAT  ← 🔴 MODIFIER ICI (sidebar)
+    ├── ════════════════════════════════════════════
+    │   └── show_chat_page()
+    │
+    ├── ════════════════════════════════════════════
+    ├── POINT D'ENTRÉE
+    ├── ════════════════════════════════════════════
+    │   └── main()
+    │
+    └── if __name__ == "__main__": main()
+    ```
+
+   - faire :  
+        ```
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+        docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+        ```
+
+    - tester :  
+          ouvrir http://localhost:8501
+          Regarder dans le sidebar : tu dois voir ⏱️ 14m 32s (ou similaire)  
+          Chaque appel /chat vérifiera si le token expire dans < 5 min  
+          Si oui, refresh automatique avant même que ça échoue ! ✨  
+
+
+## 7.3 Communication chiffrée ##
+
+le sujet dit : « L'interface utilisateur doit elle aussi être isolée dans son conteneur et assurer une communication chiffrée et sécurisée vers l'API d'IA. » => Direction précise : « vers l'API d'IA » (Streamlit → Intelligence API).
+
+Le problème actuel  
+Même avec l'authentification (7.2), tes tokens et tes messages voyagent en HTTP clair entre Streamlit et l'API.
+
+Analogie : tu as maintenant une serrure sur ta porte (7.2), mais tu cries ton mot de passe à voix haute dans la rue en entrant. Quelqu'un qui écoute (attaque Man-in-the-Middle) peut intercepter :
+- Ton mot de passe au moment du login.
+- Tes tokens (et donc se faire passer pour toi).
+- Le contenu de tes conversations.
+
+La solution : TLS (le "S" de HTTPS)  
+Le TLS chiffre tout ce qui circule sur le fil. Même si quelqu'un intercepte les paquets, il ne voit que du charabia illisible.
+```
+SANS TLS (http://) :   "password=dracula1897"   ← lisible par un espion
+AVEC TLS (https://) :  "x9$Kf#2@..."             ← charabia chiffré
+```
+
+Pourquoi "auto-signé" ou "reverse proxy local" suffit ?
+Voici la nuance importante que le sujet souligne :
+| Type de certificat | Qui le garantit ? | Usage |
+|---|---|---|
+| **Auto-signé** | Toi-même (ton PC) | Démo / formation ✅ |
+| **Certificat valide** (Let's Encrypt, etc.) | Une autorité de confiance reconnue | Vraie production 🏢 |
+
+Un certificat auto-signé chiffre tout aussi bien la communication. Sa seule "faiblesse" : le navigateur affiche un avertissement (« connexion non sécurisée ») car personne d'officiel ne garantit que tu es bien qui tu prétends être. Pour une démo locale, c'est parfaitement suffisant — le chiffrement fonctionne, c'est ce qui compte.
+
+C'est pour ça que le sujet demande explicitement de documenter que « la vraie production utiliserait un certificat valide ». On te teste sur ta compréhension, pas sur ta capacité à acheter un certificat.
+
+Les options proposées par le sujet
+1) Certificat auto-signé directement sur Uvicorn (le plus simple).
+2) Reverse proxy TLS (Traefik ou Nginx) : un conteneur supplémentaire qui gère le HTTPS et redirige vers tes APIs. Plus proche de la "vraie" production.

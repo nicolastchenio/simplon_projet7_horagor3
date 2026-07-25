@@ -89,3 +89,54 @@ BATCH_SIZE_PGVECTOR: int = int(os.getenv("BATCH_SIZE_PGVECTOR", "500"))
 # sur le réseau interne.
 # ═══════════════════════════════════════════════════════════════
 DATA_API_URL: str = os.getenv("DATA_API_URL", "http://localhost:8001")
+
+# ═══════════════════════════════════════════════════════════════
+# Authentification JWT (Phase 7.2)
+# ═══════════════════════════════════════════════════════════════
+# Système d'authentification par Refresh Tokens verrouillant les
+# échanges entre l'IHM Streamlit et l'API Intelligence, tel qu'exigé
+# par le cahier des charges (Épilogue MLOps, Couche Intelligence).
+#
+# Pour un projet de formation, un utilisateur UNIQUE est défini via
+# ces variables d'environnement (pas de gestion multi-utilisateurs).
+# ═══════════════════════════════════════════════════════════════
+
+# Clé secrète servant à SIGNER les JWT (HMAC-SHA256).
+# Doit rester strictement confidentielle : quiconque la connaît peut
+# forger des tokens valides.
+JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "CHANGE_ME_EN_PRODUCTION")
+
+# Algorithme de signature symétrique (le standard pour un secret unique).
+JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+
+# Durée de vie de l'access_token en MINUTES (court : sécurité renforcée).
+# Si volé, il n'est exploitable que quelques minutes.
+ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+    os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15")
+)
+
+# Durée de vie du refresh_token en JOURS (long : confort utilisateur).
+# Il permet de régénérer des access_token sans se reconnecter.
+REFRESH_TOKEN_EXPIRE_DAYS: int = int(
+    os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7")
+)
+
+# Identifiant de l'unique utilisateur autorisé
+AUTH_USERNAME: str = os.getenv("AUTH_USERNAME", "admin")
+
+# Hash bcrypt du mot de passe (JAMAIS le mot de passe en clair).
+# La vérification se fait via bcrypt.checkpw().
+AUTH_PASSWORD_HASH: str = os.getenv("AUTH_PASSWORD_HASH", "")
+
+# ⚠️ VALIDATION : Vérifier que les secrets critiques sont configurés
+if not JWT_SECRET_KEY or JWT_SECRET_KEY == "CHANGE_ME_EN_PRODUCTION":
+    raise ValueError(
+        "❌ JWT_SECRET_KEY non définie ou par défaut ! "
+        "Ajoute une valeur dans .env"
+    )
+
+if not AUTH_PASSWORD_HASH:
+    raise ValueError(
+        "❌ AUTH_PASSWORD_HASH non définie ! "
+        "Ajoute une valeur dans .env"
+    )

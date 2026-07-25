@@ -3,9 +3,6 @@ Interface utilisateur Streamlit du projet HorRAGor (Phase 7 - Auth).
 """
 
 import uuid
-import json
-import base64
-from datetime import datetime, timedelta
 import httpx
 import streamlit as st
 from src.config import API_BASE_URL, API_TIMEOUT
@@ -17,75 +14,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# ============================================================================
-# UTILITAIRES JWT
-# ============================================================================
-
-def decode_jwt_payload(token: str) -> dict | None:
-    """
-    Décode le payload d'un JWT sans vérifier la signature.
-    Format JWT : header.payload.signature
-    """
-    try:
-        parts = token.split(".")
-        if len(parts) != 3:
-            return None
-        
-        # Le payload est la 2e partie, avec padding base64
-        payload = parts[1]
-        # Ajouter le padding si nécessaire
-        padding = 4 - (len(payload) % 4)
-        if padding != 4:
-            payload += "=" * padding
-        
-        decoded = base64.urlsafe_b64decode(payload)
-        return json.loads(decoded)
-    
-    except Exception as e:
-        print(f"❌ Erreur décodage JWT : {e}")
-        return None
-
-def get_token_expiration(token: str) -> datetime | None:
-    """Retourne la date/heure d'expiration du token."""
-    payload = decode_jwt_payload(token)
-    if payload and "exp" in payload:
-        return datetime.fromtimestamp(payload["exp"])
-    return None
-
-def is_token_expired_soon(token: str, threshold_seconds: int = 300) -> bool:
-    """
-    Vérifie si le token expire dans moins de threshold_seconds (default 5 min).
-    Retourne True si le token expire bientôt ou est déjà expiré.
-    """
-    expiration = get_token_expiration(token)
-    if not expiration:
-        return True  # Token invalide = considéré comme expiré
-    
-    now = datetime.utcnow()
-    time_until_expiry = (expiration - now).total_seconds()
-    
-    return time_until_expiry < threshold_seconds
-
-def get_token_remaining_time(token: str) -> str:
-    """Retourne un texte lisible du temps restant avant expiration."""
-    expiration = get_token_expiration(token)
-    if not expiration:
-        return "❓ Impossible à déterminer"
-    
-    now = datetime.utcnow()
-    remaining = expiration - now
-    
-    if remaining.total_seconds() <= 0:
-        return "⏰ EXPIRÉ"
-    
-    minutes = int(remaining.total_seconds() // 60)
-    seconds = int(remaining.total_seconds() % 60)
-    
-    if minutes > 0:
-        return f"⏱️ {minutes}m {seconds}s"
-    else:
-        return f"⏱️ {seconds}s"
 
 # ============================================================================
 # INITIALISATION SESSION STATE
@@ -173,17 +101,6 @@ def logout() -> None:
 
 def call_chat_api(question: str, thread_id: str) -> dict | None:
     """Envoie une question à POST /chat avec authentification JWT."""
-    
-    # 🔴 VÉRIFICATION PROACTIVE : Token expire bientôt ?
-    if st.session_state.access_token and is_token_expired_soon(st.session_state.access_token, threshold_seconds=300):
-        if refresh_access_token():
-            st.info("🔄 Token renouvelé automatiquement.")
-        else:
-            st.error("❌ Impossible de renouveler le token. Reconnexion nécessaire.")
-            logout()
-            st.rerun()
-            return None
-    
     url = f"{API_BASE_URL}/chat"
     payload = {
         "message": question,
@@ -392,21 +309,16 @@ def show_chat_page() -> None:
     # SIDEBAR - Infos techniques + Bouton déconnexion
     with st.sidebar:
         st.header("🔧 Contexte technique")
-        
-        # 🔴 Affichage de l'expiration du token
-        remaining_time = get_token_remaining_time(st.session_state.access_token) if st.session_state.access_token else "N/A"
-        
         st.markdown(
             f"- **User :** `{st.session_state.user}`\n"
             f"- **Thread ID :** `{st.session_state.thread_id}`\n"
             f"- **Messages :** {len(st.session_state.messages)}\n"
-            f"- **Token expire :** {remaining_time}\n"
             f"- **Backend :** `{API_BASE_URL}`"
         )
-
+        
         # Divider pour séparer les infos du bouton
         st.sidebar.divider()
-
+        
         # 🔴 BOUTON DÉCONNEXION DANS LE SIDEBAR
         if st.sidebar.button("🚪 Se déconnecter", use_container_width=True, type="secondary", key="logout_btn"):
             logout()
