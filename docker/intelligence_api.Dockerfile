@@ -47,4 +47,6 @@ ENV DATA_API_URL=http://data-api:8001 \
 EXPOSE 8000
 
 # ── 8. Démarrage ──
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--ssl-keyfile", "/app/certs/key.pem", \
+     "--ssl-certfile", "/app/certs/cert.pem"]

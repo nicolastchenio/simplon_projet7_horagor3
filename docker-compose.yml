@@ -31,6 +31,10 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    # 🔒 NOUVEAU : montage du certificat TLS (stratégie B, read-only)
+    # ./certs (ton PC) → /app/certs (conteneur), chemin utilisé par le Dockerfile
+    volumes:
+      - ./certs:/app/certs:ro
     restart: unless-stopped
 
   # ── Service 3 : Frontend Streamlit (seul point d'entrée) ─────────────────
@@ -51,7 +55,11 @@ services:
     depends_on:
       - intelligence-api
     environment:
-      - API_BASE_URL=http://horragor-ia:8000
+      # 🔒 MODIFIÉ : https:// car l'API Intelligence est maintenant en TLS
+      - API_BASE_URL=https://horragor-ia:8000
+      - SSL_CERT_PATH=/app/certs/cert.pem
+    volumes:
+      - ./certs:/app/certs:ro
     restart: unless-stopped
 
 networks:

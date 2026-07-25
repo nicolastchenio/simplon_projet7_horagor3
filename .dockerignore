@@ -10,4 +10,25 @@ __pycache__/
 .gitignore
 *.md
 tests/
+docs/# .dockerignore
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+*.md
+tests/
 docs/
+
+# ==============================================
+# Certificats TLS (Phase 7.3)
+# ==============================================
+# Les certificats sont injectés via un VOLUME monté dans docker-compose,
+# jamais copiés dans l'image (évite de "cuire" un secret dans une image
+# potentiellement poussée sur un registry).
+certs/
+*.pem

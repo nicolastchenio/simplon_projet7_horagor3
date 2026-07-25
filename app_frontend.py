@@ -1,7 +1,14 @@
 """
-Interface utilisateur Streamlit du projet HorRAGor (Phase 7 - Auth).
+Interface utilisateur Streamlit du projet HorRAGor (Phase 7 - Auth + TLS).
+
+Ce module gère :
+- L'authentification JWT (login, refresh, logout)
+- La communication HTTPS sécurisée avec l'API Intelligence
+- L'affichage du chat avec gestion des sources
+- L'expiration automatique des tokens
 """
 
+import os
 import uuid
 import json
 import base64
@@ -19,80 +26,136 @@ st.set_page_config(
 )
 
 # ============================================================================
+# CONFIGURATION TLS (Phase 7.3)
+# ============================================================================
+
+# 🔒 Certificat auto-signé de l'API Intelligence.
+# 
+# httpx doit faire confiance à CE certificat précis (pas verify=False !).
+# La variable d'env SSL_CERT_PATH est définie dans docker-compose.yml.
+# En local (hors Docker), elle prend la valeur par défaut /app/certs/cert.pem.
+#
+# Pourquoi ? Parce que l'API Intelligence est maintenant en HTTPS (TLS).
+# Sans ce certificat, httpx refuse la connexion avec : SSL: CERTIFICATE_VERIFY_FAILED
+SSL_VERIFY = os.getenv("SSL_CERT_PATH", "/app/certs/cert.pem")
+
+# ============================================================================
 # UTILITAIRES JWT
 # ============================================================================
 
 def decode_jwt_payload(token: str) -> dict | None:
     """
     Décode le payload d'un JWT sans vérifier la signature.
+    
     Format JWT : header.payload.signature
+    
+    Args:
+        token: Le token JWT complet (string)
+    
+    Returns:
+        dict | None: Le contenu du payload (claims), ou None si erreur
     """
     try:
         parts = token.split(".")
         if len(parts) != 3:
             return None
-        
+
         # Le payload est la 2e partie, avec padding base64
         payload = parts[1]
         # Ajouter le padding si nécessaire
         padding = 4 - (len(payload) % 4)
         if padding != 4:
             payload += "=" * padding
-        
+
         decoded = base64.urlsafe_b64decode(payload)
         return json.loads(decoded)
-    
+
     except Exception as e:
         print(f"❌ Erreur décodage JWT : {e}")
         return None
 
+
 def get_token_expiration(token: str) -> datetime | None:
-    """Retourne la date/heure d'expiration du token."""
+    """
+    Retourne la date/heure d'expiration du token.
+    
+    Args:
+        token: Le token JWT
+    
+    Returns:
+        datetime | None: La date d'expiration, ou None si pas trouvée
+    """
     payload = decode_jwt_payload(token)
     if payload and "exp" in payload:
         return datetime.fromtimestamp(payload["exp"])
     return None
 
+
 def is_token_expired_soon(token: str, threshold_seconds: int = 300) -> bool:
     """
     Vérifie si le token expire dans moins de threshold_seconds (default 5 min).
-    Retourne True si le token expire bientôt ou est déjà expiré.
+    
+    Args:
+        token: Le token JWT
+        threshold_seconds: Seuil d'alerte avant expiration (en secondes)
+    
+    Returns:
+        bool: True si le token expire bientôt ou est déjà expiré
     """
     expiration = get_token_expiration(token)
     if not expiration:
         return True  # Token invalide = considéré comme expiré
-    
+
     now = datetime.utcnow()
     time_until_expiry = (expiration - now).total_seconds()
-    
+
     return time_until_expiry < threshold_seconds
 
+
 def get_token_remaining_time(token: str) -> str:
-    """Retourne un texte lisible du temps restant avant expiration."""
+    """
+    Retourne un texte lisible du temps restant avant expiration du token.
+    
+    Args:
+        token: Le token JWT
+    
+    Returns:
+        str: Texte formaté du temps restant (ex: "⏱️ 12m 34s")
+    """
     expiration = get_token_expiration(token)
     if not expiration:
         return "❓ Impossible à déterminer"
-    
+
     now = datetime.utcnow()
     remaining = expiration - now
-    
+
     if remaining.total_seconds() <= 0:
         return "⏰ EXPIRÉ"
-    
+
     minutes = int(remaining.total_seconds() // 60)
     seconds = int(remaining.total_seconds() % 60)
-    
+
     if minutes > 0:
         return f"⏱️ {minutes}m {seconds}s"
     else:
         return f"⏱️ {seconds}s"
+
 
 # ============================================================================
 # INITIALISATION SESSION STATE
 # ============================================================================
 
 def init_session_state() -> None:
-    """Initialise les variables persistantes dans la session Streamlit."""
+    """
+    Initialise les variables persistantes dans la session Streamlit.
+    
+    Crée les clés suivantes si elles n'existent pas :
+    - access_token: Le JWT pour accéder à l'API
+    - refresh_token: Le JWT pour renouveler l'access_token
+    - user: Le nom d'utilisateur connecté
+    - messages: L'historique du chat
+    - thread_id: L'identifiant de la conversation
+    """
     if "access_token" not in st.session_state:
         st.session_state.access_token = None
     if "refresh_token" not in st.session_state:
@@ -104,17 +167,34 @@ def init_session_state() -> None:
     if "thread_id" not in st.session_state:
         st.session_state.thread_id = str(uuid.uuid4())
 
+
 # ============================================================================
 # AUTHENTIFICATION
 # ============================================================================
 
 def login(username: str, password: str) -> bool:
-    """Appelle POST /auth/login et stocke les tokens si succès."""
+    """
+    Appelle POST /auth/login et stocke les tokens en cas de succès.
+    
+    Cette fonction :
+    1. Envoie les credentials à l'endpoint /auth/login (HTTPS)
+    2. Reçoit access_token + refresh_token
+    3. Les stocke dans st.session_state
+    
+    Args:
+        username: L'identifiant de l'utilisateur
+        password: Le mot de passe
+    
+    Returns:
+        bool: True si login réussi, False sinon
+    """
     url = f"{API_BASE_URL}/auth/login"
     payload = {"username": username, "password": password}
 
     try:
-        with httpx.Client(timeout=API_TIMEOUT) as client:
+        # 🔒 MODIFICATION TLS : ajout de verify=SSL_VERIFY
+        # Cela dit à httpx de faire confiance au certificat dans SSL_VERIFY
+        with httpx.Client(timeout=API_TIMEOUT, verify=SSL_VERIFY) as client:
             resp = client.post(url, json=payload)
             resp.raise_for_status()
 
@@ -137,8 +217,17 @@ def login(username: str, password: str) -> bool:
         st.error(f"❌ Erreur inattendue : {exc}")
         return False
 
+
 def refresh_access_token() -> bool:
-    """Appelle POST /auth/refresh pour obtenir un nouvel access_token."""
+    """
+    Appelle POST /auth/refresh pour obtenir un nouvel access_token.
+    
+    Utilise le refresh_token stocké pour demander un nouvel access_token
+    sans que l'utilisateur ait à se reconnecter.
+    
+    Returns:
+        bool: True si refresh réussi, False sinon
+    """
     if not st.session_state.refresh_token:
         return False
 
@@ -146,7 +235,8 @@ def refresh_access_token() -> bool:
     payload = {"refresh_token": st.session_state.refresh_token}
 
     try:
-        with httpx.Client(timeout=API_TIMEOUT) as client:
+        # 🔒 MODIFICATION TLS : ajout de verify=SSL_VERIFY
+        with httpx.Client(timeout=API_TIMEOUT, verify=SSL_VERIFY) as client:
             resp = client.post(url, json=payload)
             resp.raise_for_status()
 
@@ -159,22 +249,46 @@ def refresh_access_token() -> bool:
     except Exception:
         return False
 
+
 def logout() -> None:
-    """Efface tous les tokens et redéfinit la session."""
+    """
+    Efface tous les tokens et réinitialise la session.
+    
+    Appelée quand :
+    - L'utilisateur clique sur "Se déconnecter"
+    - Le token est expiré et impossible à renouveler
+    """
     st.session_state.access_token = None
     st.session_state.refresh_token = None
     st.session_state.user = None
     st.session_state.messages = []
     st.session_state.thread_id = str(uuid.uuid4())
 
+
 # ============================================================================
 # APPEL API
 # ============================================================================
 
 def call_chat_api(question: str, thread_id: str) -> dict | None:
-    """Envoie une question à POST /chat avec authentification JWT."""
+    """
+    Envoie une question à POST /chat avec authentification JWT.
     
+    Cette fonction gère :
+    1. Vérification proactive de l'expiration du token (refresh si besoin)
+    2. Envoi de la question avec le header Authorization: Bearer <token>
+    3. Gestion des réponses 200, 401 (token expiré), et erreurs
+    4. Appel automatique du refresh si 401
+    
+    Args:
+        question: La question posée par l'utilisateur
+        thread_id: L'identifiant de la conversation
+    
+    Returns:
+        dict | None: La réponse JSON de l'API, ou None si erreur
+    """
+
     # 🔴 VÉRIFICATION PROACTIVE : Token expire bientôt ?
+    # Si oui, on le renouvelle AVANT de faire l'appel API
     if st.session_state.access_token and is_token_expired_soon(st.session_state.access_token, threshold_seconds=300):
         if refresh_access_token():
             st.info("🔄 Token renouvelé automatiquement.")
@@ -183,7 +297,7 @@ def call_chat_api(question: str, thread_id: str) -> dict | None:
             logout()
             st.rerun()
             return None
-    
+
     url = f"{API_BASE_URL}/chat"
     payload = {
         "message": question,
@@ -196,13 +310,15 @@ def call_chat_api(question: str, thread_id: str) -> dict | None:
     }
 
     try:
-        with httpx.Client(timeout=API_TIMEOUT) as client:
+        # 🔒 MODIFICATION TLS : ajout de verify=SSL_VERIFY
+        with httpx.Client(timeout=API_TIMEOUT, verify=SSL_VERIFY) as client:
             resp = client.post(url, headers=headers, json=payload)
 
             if resp.status_code == 200:
                 return resp.json()
 
             elif resp.status_code == 401:
+                # Token expiré → essai de refresh + retry
                 st.info("🔄 Token expiré, renouvellement en cours...")
 
                 if refresh_access_token():
@@ -237,12 +353,21 @@ def call_chat_api(question: str, thread_id: str) -> dict | None:
         st.error(f"❌ Erreur inattendue : {exc}")
         return None
 
+
 # ============================================================================
 # AFFICHAGE
 # ============================================================================
 
 def _render_source(source: dict, index: int) -> None:
-    """Affiche une source documentaire."""
+    """
+    Affiche une source documentaire dans un format lisible.
+    
+    Affiche : titre, année, score de pertinence, et aperçu du contenu.
+    
+    Args:
+        source: Dictionnaire contenant les métadatas de la source
+        index: Numéro de la source (pour l'affichage)
+    """
     source_type = source.get("type", "inconnu")
     score = source.get("score")
     title = source.get("title")
@@ -268,8 +393,15 @@ def _render_source(source: dict, index: int) -> None:
 
     st.divider()
 
+
 def display_chat_history() -> None:
-    """Affiche l'intégralité de la conversation."""
+    """
+    Affiche l'intégralité de la conversation.
+    
+    Pour chaque message :
+    - Affiche le rôle (user/assistant) avec sa bulle de chat
+    - Si assistant : affiche les sources et métadatas
+    """
     for msg in st.session_state.messages:
         role = msg.get("role", "assistant")
 
@@ -292,8 +424,18 @@ def display_chat_history() -> None:
                                 st.markdown(f"**{idx}.** {str(source)[:300]}")
                                 st.divider()
 
+
 def handle_user_input() -> None:
-    """Gère le cycle complet : saisie utilisateur → appel API → affichage bot."""
+    """
+    Gère le cycle complet : saisie utilisateur → appel API → affichage bot.
+    
+    Flux :
+    1. Récupère la saisie via st.chat_input()
+    2. Ajoute le message utilisateur à l'historique
+    3. Appelle call_chat_api()
+    4. Affiche la réponse du bot + sources
+    5. Ajoute le message assistant à l'historique
+    """
     if prompt := st.chat_input("Poser moi une question..."):
         user_msg = {"role": "user", "content": prompt}
         st.session_state.messages.append(user_msg)
@@ -344,12 +486,20 @@ def handle_user_input() -> None:
                     "metadata": {},
                 })
 
+
 # ============================================================================
 # PAGE DE LOGIN
 # ============================================================================
 
 def show_login_page() -> None:
-    """Affiche la page de login."""
+    """
+    Affiche la page de login.
+    
+    Contient :
+    - Formulaire (username + password)
+    - Bouton "Se connecter"
+    - Message d'aide avec identifiants de démo
+    """
     st.title("🧠 HorRAGor")
     st.caption("L'agent IA de l'horreur — Authentification requise")
     st.divider()
@@ -370,12 +520,21 @@ def show_login_page() -> None:
     st.divider()
     st.caption("📝 **Démo :** admin / motdepasse123")
 
+
 # ============================================================================
 # PAGE CHAT
 # ============================================================================
 
 def show_chat_page() -> None:
-    """Affiche le chat avec le bouton déconnexion dans le sidebar."""
+    """
+    Affiche le chat avec le bouton déconnexion dans le sidebar.
+    
+    Contient :
+    - Titre et description du projet
+    - Historique du chat
+    - Saisie utilisateur
+    - Sidebar avec infos techniques + bouton de déconnexion
+    """
 
     st.title("🧠 HorRAGor")
 
@@ -392,10 +551,10 @@ def show_chat_page() -> None:
     # SIDEBAR - Infos techniques + Bouton déconnexion
     with st.sidebar:
         st.header("🔧 Contexte technique")
-        
+
         # 🔴 Affichage de l'expiration du token
         remaining_time = get_token_remaining_time(st.session_state.access_token) if st.session_state.access_token else "N/A"
-        
+
         st.markdown(
             f"- **User :** `{st.session_state.user}`\n"
             f"- **Thread ID :** `{st.session_state.thread_id}`\n"
@@ -412,18 +571,26 @@ def show_chat_page() -> None:
             logout()
             st.rerun()
 
+
 # ============================================================================
 # POINT D'ENTRÉE PRINCIPAL
 # ============================================================================
 
 def main() -> None:
-    """Point d'entrée : affiche login OU chat selon l'authentification."""
+    """
+    Point d'entrée principal : affiche login OU chat selon l'authentification.
+    
+    Logique :
+    - Si pas de access_token → affiche la page de login
+    - Si access_token présent → affiche la page de chat
+    """
     init_session_state()
 
     if not st.session_state.access_token:
         show_login_page()
     else:
         show_chat_page()
+
 
 if __name__ == "__main__":
     main()

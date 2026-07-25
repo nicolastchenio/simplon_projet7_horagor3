@@ -2089,7 +2089,7 @@ Plan :
 
 ## 7.3 Communication chiffrée ##
 
-le sujet dit : « L'interface utilisateur doit elle aussi être isolée dans son conteneur et assurer une communication chiffrée et sécurisée vers l'API d'IA. » => Direction précise : « vers l'API d'IA » (Streamlit → Intelligence API).
+Le sujet dit : « L'interface utilisateur doit elle aussi être isolée dans son conteneur et assurer une communication chiffrée et sécurisée vers l'API d'IA. » => Direction précise : « vers l'API d'IA » (Streamlit → Intelligence API).
 
 Le problème actuel  
 Même avec l'authentification (7.2), tes tokens et tes messages voyagent en HTTP clair entre Streamlit et l'API.
@@ -2106,6 +2106,19 @@ SANS TLS (http://) :   "password=dracula1897"   ← lisible par un espion
 AVEC TLS (https://) :  "x9$Kf#2@..."             ← charabia chiffré
 ```
 
+L'objectif passer de :  
+` Streamlit  ──── HTTP (clair) ────►  API IA   ❌ Espionnable `  
+vers  
+` Streamlit  ──── HTTPS (TLS) ────►  API IA   ✅ Chiffré `
+
+Donc le flux a chiffrer:
+```
+Streamlit (app_frontend.py)
+   │  API_BASE_URL=http://horragor-ia:8000   ← à passer en https://
+   ▼
+Intelligence API (src/main.py sur port 8000)  ← à passer en TLS
+```
+
 Pourquoi "auto-signé" ou "reverse proxy local" suffit ?
 Voici la nuance importante que le sujet souligne :
 | Type de certificat | Qui le garantit ? | Usage |
@@ -2120,3 +2133,153 @@ C'est pour ça que le sujet demande explicitement de documenter que « la vraie 
 Les options proposées par le sujet
 1) Certificat auto-signé directement sur Uvicorn (le plus simple).
 2) Reverse proxy TLS (Traefik ou Nginx) : un conteneur supplémentaire qui gère le HTTPS et redirige vers tes APIs. Plus proche de la "vraie" production.
+
+On ne fera que le certificat auto-signé directement par uvicorn.
+
+Plan d'action :
+
+| # | Action | Fichier concerné |
+|---|---|---|
+| **1** | 🐍 Générer `cert.pem` + `key.pem` en Python | Nouveau : `scripts/generate_cert.py` |
+| **2** | 📁 Copier les certs + ajouter options TLS à Uvicorn | `intelligence_api.Dockerfile` |
+| **3** | 🔗 Passer `API_BASE_URL` en `https://` + accepter cert auto-signé | `docker-compose.yml` + `app_frontend.py` |
+| **4** | 📄 Documenter (prod = vrai certificat) | README |
+
+1) Générer le certificat
+
+    un certificat TLS est composé de 2 fichiers :
+    | Fichier | Rôle | Analogie |
+    |---|---|---|
+    | **`key.pem`** (clé privée) | Déchiffre les messages. **SECRET** 🔒 | Ta clé de maison (à ne jamais donner) |
+    | **`cert.pem`** (certificat public) | Prouve ton identité + chiffre. **PUBLIC** 📢 | Ta carte d'identité (montrable) |
+
+    Il faut distinguer 2 choses différentes :
+    | Étape | Rôle | Outil |
+    |---|---|---|
+    | **1. Générer** le certificat (`.pem`) | Créer les fichiers `key.pem` + `cert.pem` | OpenSSL (ou Python) |
+    | **2. Utiliser** le certificat | Uvicorn charge les fichiers et chiffre | Uvicorn |
+
+    Le fonctionnement : 
+      1. Streamlit se connecte à l'API
+      2. L'API montre son cert.pem (« voici mon identité »)
+      3. Streamlit chiffre les données avec la clé publique du cert
+      4. Seule l'API peut déchiffrer avec sa key.pem privée
+      5. ✅ Communication sécurisée établie
+
+    - Générer le certificat en Python  
+        ` uv pip install cryptography `  
+        ajouter le script dans " scripts/generate_cert.py "
+        Lance le script : ` python scripts/generate_cert.py `  
+        Vérifie que le dossier certs/ contient bien key.pem et cert.pem
+
+    Details importants :
+    - Le Common Name = horragor-ia => C'est crucial que le  docker-compose.yml, Streamlit appelle l'API via : ` API_BASE_URL=http://horragor-ia:8000 `. Le certificat doit correspondre à ce nom horragor-ia, sinon la validation TLS échoue.
+    - Les SAN (Subject Alternative Names) => On ajouté horragor-ia et localhost pour que ça marche : En Docker (via horragor-ia) et En local dev (via localhost)
+
+2) Configurer Uvicorn en HTTPS  
+   - On modifie " docker/intelligence_api.Dockerfile"  pour que sa commande de lancement charge le certificat :
+       ```
+       CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", \
+           "--ssl-keyfile", "/app/certs/key.pem", \
+           "--ssl-certfile", "/app/certs/cert.pem"]
+       ```
+   - On modifie "docker-compose.yml" :  
+       1) Ajouter le volume certs car on a choisi la stratégie B (volume monté) : le certificat n'est PAS dans l'image Docker, il est "branché" au démarrage depuis ton PC.
+           ```
+           volumes:
+           - ./certs:/app/certs:ro
+           ```
+           - ./certs = le dossier sur ton PC (celui qui contient key.pem + cert.pem)  
+           - /app/certs = où ces fichiers apparaissent DANS le conteneur (c'est le chemin que ton Dockerfile utilise : /app/certs/key.pem)  
+           - :ro = read-only (le conteneur peut lire mais pas modifier → sécurité)  
+
+           👉 Le lien avec ton Dockerfile : ta commande CMD cherche /app/certs/key.pem. Ce volume est ce qui remplit ce dossier /app/certs. Sans lui, le fichier n'existe pas → Uvicorn plante au démarrage.
+
+       2) Passer API_BASE_URL en https://  
+           Dans le service frontend, Streamlit appelle l'API. Comme l'API est maintenant en HTTPS, l'URL doit changer :
+           ```
+           # AVANT
+           - API_BASE_URL=http://horragor-ia:8000
+           # APRÈS
+           - API_BASE_URL=https://horragor-ia:8000
+           ```
+   - Il y a un piège classique qui va arriver : ton certificat est auto-signé. Quand Streamlit (via httpx) va appeler https://horragor-ia:8000, httpx va refuser le certificat par défaut avec une erreur du type : `
+   httpx.ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] `. C'est normal et attendu : httpx ne fait pas confiance à un certificat qu'aucune autorité officielle n'a signé. On réglera ça à l'étape 3 dans app_frontend.py en disant à httpx de faire confiance à TON cert.pem (le bon comportement) — on n'utilisera PAS verify=False (mauvaise pratique).
+
+3) Configurer httpx dans app_frontend.py pour qu'il fasse confiance à ton certificat.
+
+- créer le client httpx à 3 endroits :
+    ```
+    with httpx.Client(timeout=API_TIMEOUT) as client:   # dans login()
+    with httpx.Client(timeout=API_TIMEOUT) as client:   # dans refresh_access_token()
+    with httpx.Client(timeout=API_TIMEOUT) as client:   # dans call_chat_api()
+    ```
+- dire à httpx de faire confiance à TON cert.pem  
+    Le paramètre verify= de httpx.Client accepte un chemin vers un certificat de confiance. On lui passe ton cert.pem.
+
+    Ajouter une constante en haut du fichier :
+    ```
+    import os
+
+    # 🔒 Certificat auto-signé de l'API Intelligence (TLS, Phase 7.3).
+    # httpx doit faire confiance à CE certificat précis (pas verify=False !).
+    # Chemin dans le conteneur frontend → à monter via volume dans docker-compose.
+    SSL_VERIFY = os.getenv("SSL_CERT_PATH", "/app/certs/cert.pem")
+    ```
+- Ajouter verify=SSL_VERIFY aux 3 clients 
+` with httpx.Client(timeout=API_TIMEOUT, verify=SSL_VERIFY) as client: `
+
+- Conséquence importante : le frontend a AUSSI besoin du cert  
+    Le conteneur frontend doit accéder à /app/certs/cert.pem. Il faut donc monter le même volume sur le service frontend dans docker-compose.yml :
+    ```
+    frontend:
+        ...
+        environment:
+        - API_BASE_URL=https://horragor-ia:8000
+        - SSL_CERT_PATH=/app/certs/cert.pem
+        volumes:
+        - ./certs:/app/certs:ro
+    ```
+
+- lancer : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build `  
+    et verifier les logs ` docker logs horragor-ia | tail -20 `  
+    On devra voir Uvicorn running on https://0.0.0.0:8000 (le https confirme que TLS est actif ✅).
+
+- Ouvrir  http://localhost:8501 et teste le login :  
+    Identifiant : admin  
+    Mot de passe : motdepasse123
+
+- Vérification :  
+` docker logs -f horragor-ia ` on doit voir 
+` INFO:     Uvicorn running on https://0.0.0.0:8000 `
+
+Sreamlit lui-même reste en HTTP (:8501), ce qui est normal. Voici pourquoi :
+```
+┌─────────────────┐
+│  Navigateur     │
+│  (sur ton PC)   │
+└────────┬────────┘
+         │
+         │ HTTP (normal, pas HTTPS)
+         ↓
+┌─────────────────────────────┐
+│  Streamlit Frontend         │
+│  http://localhost:8501      │ ← C'est bon comme ça
+│  (conteneur horragor-front) │
+└─────────┬───────────────────┘
+          │
+          │ HTTPS (certificat auto-signé)
+          │ Communication interne au réseau Docker
+          ↓
+┌─────────────────────────────┐
+│  Intelligence API (Uvicorn) │
+│  https://horragor-ia:8000   │ ← C'est ça qui est en HTTPS
+│  (conteneur horragor-ia)    │
+└─────────────────────────────┘
+```
+Streamlit n'a pas besoin d'être en HTTPS parce que :
+- C'est une application locale (sur ta machine)
+- Le navigateur accède via localhost (réseau local)
+- La sécurité TLS se fait entre les conteneurs Docker (réseau interne)
+
+Le certificat auto-signé (cert.pem) est uniquement pour l'API Intelligence (communication conteneur-à-conteneur).
