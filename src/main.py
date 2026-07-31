@@ -7,7 +7,6 @@ Charge le graphe LangGraph compilé au démarrage et expose un endpoint /chat.
 
 from __future__ import annotations
 from datetime import datetime
-
 import asyncio
 import uuid
 from langchain_core.messages import HumanMessage
@@ -18,6 +17,15 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from src.api.auth import router as auth_router
 from src.auth.security import verify_access_token
+# ═══════════════════════════════════════════════════════════════
+# Observabilité (Phase 8) — import non bloquant
+# ═══════════════════════════════════════════════════════════════
+# Ce module ne lève jamais d'exception : si Langfuse est indisponible,
+# get_langfuse_handler() retourne None et l'agent fonctionne normalement.
+from src.observability.langfuse_client import (
+    flush_langfuse,
+    get_langfuse_handler,
+)
 
 # ═══════════════════════════════════════════════════════════════
 # MODÈLES PYDANTIC — Contrat d'entrée/sortie de l'API
@@ -81,21 +89,38 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Gère le cycle de vie du serveur FastAPI.
 
     Au démarrage :
-        1. Importe et compile le graphe HorRAGor (build_horragor_graph).
-        2. Stocke le graphe compilé dans _compiled_graph.
+        1. Importe et compile le graphe HorRAGor (``build_horragor_graph``).
+        2. Stocke le graphe compilé dans ``_compiled_graph``.
+        3. Initialise l'observabilité Langfuse (Phase 8) afin que le log
+           « Langfuse actif / désactivé » apparaisse dès le boot, et non
+           à la première requête utilisateur.
+
     À l'arrêt :
-        Libère la référence pour permettre le garbage collection propre.
+        1. Vide le buffer Langfuse (``flush_langfuse``). Le SDK accumule
+           les traces en mémoire et les envoie par lots en tâche de fond ;
+           sans ce vidage, les dernières traces seraient perdues lors de
+           l'extinction du conteneur.
+        2. Libère la référence au graphe pour permettre un garbage
+           collection propre.
     """
     global _compiled_graph
 
+    # ── DÉMARRAGE ──
     print("[lifespan] Compilation du graphe LangGraph en cours...")
     from src.graph.pipeline import build_horragor_graph
 
     _compiled_graph = build_horragor_graph()
     print("[lifespan] Graphe compilé et prêt.")
 
-    yield
+    # Initialisation anticipée de l'observabilité.
+    # L'appel est volontairement ignoré (le handler est mis en cache dans
+    # le module) : on ne cherche ici qu'à déclencher le log de statut.
+    get_langfuse_handler()
 
+    yield  # ─── L'application sert les requêtes ici ───
+
+    # ── EXTINCTION ──
+    flush_langfuse()
     print("[lifespan] Arrêt du serveur, nettoyage du graphe.")
     _compiled_graph = None
 
@@ -107,7 +132,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enregistre le routeur d'authentification  ← NOUVEAU
+# Enregistre le routeur d'authentification
 app.include_router(auth_router)
 
 
@@ -191,14 +216,43 @@ async def chat_endpoint(
         "metadata": {"session_id": str(uuid.uuid4()), "username": username},
     }
 
-    config = {"configurable": {"thread_id": thread_id}}
+    # ═══════════════════════════════════════════════════════════════
+    # Configuration LangGraph + Observabilité Langfuse
+    # ═══════════════════════════════════════════════════════════════
+    # `configurable.thread_id` : clé du checkpointer (mémoire de session).
+    # `callbacks`              : liste de handlers LangChain. Langfuse y
+    #                            observe automatiquement chaque nœud du
+    #                            graphe et chaque appel LLM/embedding.
+    # `metadata`               : enrichissements visibles dans l'UI
+    #                            Langfuse, très utiles pour filtrer les
+    #                            traces (par utilisateur, par session).
+    # `run_name`               : nom lisible de la trace dans l'UI.
+    # ═══════════════════════════════════════════════════════════════
+    langfuse_handler = get_langfuse_handler()
+
+    graph_config: dict[str, Any] = {
+        "configurable": {"thread_id": thread_id},
+        "run_name": "horragor-chat",
+        "metadata": {
+            # Préfixes spéciaux reconnus par Langfuse pour alimenter
+            # ses filtres natifs dans l'interface web :
+            "langfuse_user_id": username,
+            "langfuse_session_id": thread_id,
+            "langfuse_tags": ["horragor", "rag", "production"],
+        },
+    }
+
+    # On n'ajoute la clé `callbacks` que si le handler existe, afin de
+    # ne jamais passer [None] à LangGraph (qui lèverait une erreur).
+    if langfuse_handler is not None:
+        graph_config["callbacks"] = [langfuse_handler]
 
     # --- 3. Invocation du graphe (hors du thread async principal) ---
     try:
         final_state: AgentState = await asyncio.to_thread(
             _compiled_graph.invoke,
             initial_state,
-            config,
+            graph_config,   # ← anciennement `config`
         )
     except Exception as exc:
         raise HTTPException(

@@ -29,6 +29,9 @@ horragor-project/
 │   │──api/
 │   │   ├── __init__.py
 │   │   └── auth.py  
+│   │──observability/
+│   │   ├── __init__.py
+│   │   └── langfuse_client.py  
 │   │──auth/
 │   │   ├── __init__.py
 │   │   └── security.py  
@@ -56,6 +59,30 @@ horragor-project/
 ├── .env.docker
 └── .env.example
 ```
+
+# demarrer le projet #
+
+
+si les conteneurs docker sont demarre:
+langfuse => http://localhost:3000/
+streamlit => http://localhost:8501/
+fast api => https://localhost:8000/docs
+
+si non  
+
+```
+docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+ou peut être :
+```
+docker compose down
+docker compose up -d --build
+```
+
+verification  => ` docker ps `
+
 
 ## 🔒 Phase 7.3 — Communication chiffrée (TLS/HTTPS)
 

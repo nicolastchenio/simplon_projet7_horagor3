@@ -45,6 +45,30 @@ OLLAMA_EMBEDDING_MODEL: str = os.getenv(
 )
 
 # ═══════════════════════════════════════════════════════════════
+# Observabilité Langfuse (Phase 8)
+# ═══════════════════════════════════════════════════════════════
+# Langfuse trace chaque exécution du graphe : durée par nœud,
+# prompts envoyés, réponses reçues, tokens consommés, erreurs.
+#
+# Le SDK Langfuse lit ses credentials directement dans os.environ.
+# Comme python-dotenv les a déjà chargées ci-dessus (load_dotenv),
+# aucune propagation manuelle n'est nécessaire — sauf pour le HOST,
+# dont on veut garantir la valeur par défaut Docker.
+# ═══════════════════════════════════════════════════════════════
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+
+# L'observabilité n'est active que si les DEUX clés sont fournies.
+# Cela évite les erreurs 401 en boucle si l'une manque.
+LANGFUSE_ENABLED: bool = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
+
+# Le SDK cherche LANGFUSE_HOST dans os.environ. On réinjecte la valeur
+# résolue (avec son défaut) pour couvrir le cas où la variable n'était
+# pas définie du tout dans l'environnement.
+os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST
+
+# ═══════════════════════════════════════════════════════════════
 # Base de données PostgreSQL / Supabase
 # ═══════════════════════════════════════════════════════════════
 DATABASE_URL: str = os.getenv(

@@ -2086,7 +2086,6 @@ Plan :
           Chaque appel /chat vérifiera si le token expire dans < 5 min  
           Si oui, refresh automatique avant même que ça échoue ! ✨  
 
-
 ## 7.3 Communication chiffrée ##
 
 Le sujet dit : « L'interface utilisateur doit elle aussi être isolée dans son conteneur et assurer une communication chiffrée et sécurisée vers l'API d'IA. » => Direction précise : « vers l'API d'IA » (Streamlit → Intelligence API).
@@ -2283,3 +2282,585 @@ Streamlit n'a pas besoin d'être en HTTPS parce que :
 - La sécurité TLS se fait entre les conteneurs Docker (réseau interne)
 
 Le certificat auto-signé (cert.pem) est uniquement pour l'API Intelligence (communication conteneur-à-conteneur).
+
+# Phase 8 : Monitoring avec Langfuse, Loguru et la stack Prometheus #
+## 8.1 Langfuse ##
+
+sources :
+- https://github.com/langfuse/langfuse
+- https://langfuse.com/
+- https://www.datacamp.com/tutorial/langfuse?utm_cid=23552157100&utm_aid=188237542690&utm_campaign=230119_1-ps-other~dsa-tofu~ai_2-b2c_3-emea_4-prc_5-na_6-na_7-le_8-pdsh-go_9-nb-e_10-na_11-na&utm_loc=9218685-&utm_mtd=-c&utm_kw=&utm_source=google&utm_medium=paid_search&utm_content=ps-other~emea-en~dsa~tofu~tutorial~artificial-intelligence&gad_source=1&gad_campaignid=23552157100&gbraid=0AAAAADQ9WsFFDQVglWF5tu8tt0306wgvu&gclid=CjwKCAjwvZHTBhAlEiwA1ug5P3jZNXH5qRbSxZVTJ6T50ft5pfNSnFIqH8WAUscK_PfiI4tjlCnnVhoCx68QAvD_BwE
+- 
+
+Langfuse est un outil de monitoring open-source qui trace, évalue et calcule le coût
+de chaque étape de vos agents LLM en temps réel.
+
+Imagine que ton agent HorRAGor est une boîte noire. Quand un utilisateur pose une question, il se passe plein de choses invisibles :
+```
+Question utilisateur
+   ↓
+[RAG Node]      → cherche dans FAISS (combien de temps ? quels résultats ?)
+   ↓
+[Router]        → décide : enrichir via web ou pas ? (pourquoi cette décision ?)
+   ↓
+[Scraper Node]  → va sur Wikipedia (a-t-il réussi ? combien de temps ?)
+   ↓
+[Narration]     → génère la réponse avec le LLM (combien de tokens ? quel coût ?)
+   ↓
+Réponse finale
+```
+
+Langfuse est un outil d'observabilité (observability) spécialisé pour les applications LLM. Langfuse va montrer :
+
+| Ce que tu vois | Utilité concrète |
+|---|---|
+| 🕐 **Latence par étape** | "Le RAG prend 8s, c'est lui le goulot d'étranglement" |
+| 🔢 **Tokens consommés** | "Cette réponse a coûté 1200 tokens" |
+| 📊 **Traces complètes** | Voir l'arbre RAG → Router → Narration pour chaque requête |
+| 🐛 **Erreurs** | "Le scraper a planté sur cette question précise" |
+| 💬 **Prompts exacts** | Voir le prompt EXACT envoyé au LLM (très utile pour débugger) |
+
+
+Vocabulaire important
+- Trace : l'enregistrement complet d'une requête (de la question à la réponse)
+- Span : une sous-étape dans une trace (ex: le RAG Node est un span)
+- CallbackHandler : le "mouchard" qu'on branche sur LangGraph pour qu'il envoie automatiquement les infos à Langfuse
+
+Plan d'action :
+
+| Étape | Action | Fichier concerné |
+|---|---|---|
+| **A** | Installer Langfuse en local (Docker) | Terminal |
+| **B** | Créer un compte local + projet → récupérer les clés | Navigateur (`localhost:3000`) |
+| **C** | Installer le package Python `langfuse` | `pyproject.toml` |
+| **D** | Ajouter les clés dans les fichiers `.env` | `.env`, `.env.example`, `.env.docker` |
+| **E** | Configurer `src/config.py` | `src/config.py` |
+| **F** | Créer un helper Langfuse | `src/observability/langfuse_client.py` |
+| **G** | Brancher le callback dans `main.py` | `src/main.py` |
+| **H** | Tester et vérifier dans l'interface | Navigateur |
+
+### étape A : Installer Langfuse en local
+
+La distinction fondamentale : Langfuse Serveur vs Langfuse Client
+
+| | Le **SERVEUR** Langfuse | Le **CLIENT** Langfuse |
+|---|---|---|
+| **C'est quoi ?** | L'application web complète (le `git clone`) | Le petit package Python (`uv add langfuse`) |
+| **Rôle** | Stocke et affiche les traces (l'interface sur `:3000`) | Envoie les traces depuis ton code |
+| **Où ?** | Un **service externe** qui tourne à côté | **Dans** ton projet `horragor-project` |
+| **Analogie** | Le **serveur de mails** (Gmail) | Ton **application mail** (Outlook) |
+
+- Seul le CLIENT (uv add langfuse) va dans ton projet.
+- Le SERVEUR (git clone) est une infrastructure séparée, comme ta base Supabase.
+
+=>  on n'installera pas le serveur dans notre projet horragor-project/ mais dans un un projet (dossier) "langfuse" a part:
+
+```
+C:\Users\toi\Projets\           ← Le  dossier de travail général
+│
+├── horragor-project/           ← Le projet (inchangé)
+│   ├── src/
+│   ├── docker-compose.yml
+│   └── ...
+│
+└── langfuse/                   ← Le git clone VA ICI (À CÔTÉ, pas dedans !)
+    ├── docker-compose.yml       ← Le compose de Langfuse
+    └── ...
+```
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ DISQUE                                              │
+│                                                          │
+│  ┌──────────────────────┐    ┌────────────────────────┐ │
+│  │  horragor-project/   │    │  langfuse/             │ │
+│  │                      │    │                        │ │
+│  │  uv add langfuse ────┼───►│  (serveur sur :3000)   │ │
+│  │  (le CLIENT)         │    │  docker compose up -d  │ │
+│  │                      │    │                        │ │
+│  │  Le code envoie     │    │  reçoit et affiche     │ │
+│  │  les traces  ───────────► │  les traces            │ │
+│  └──────────────────────┘    └────────────────────────┘ │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+Pour information un seul serveur Langfuse (ici en local) peut suivre plusieurs projets LLM différents en parallèle car c'est une plateforme de monitoring mutualisée
+```
+┌──────────────────────────────────────────────────────┐
+│  SERVEUR LANGFUSE (localhost:3000)                    │
+│  (une seule installation Docker)                      │
+│                                                       │
+│  ┌─────────────────┐  ┌─────────────────┐            │
+│  │ Projet          │  │ Projet          │            │
+│  │ "HorRAGor"      │  │ "Chatbot-RH"    │  ...       │
+│  │                 │  │                 │            │
+│  │ pk-lf-aaa...    │  │ pk-lf-bbb...    │            │
+│  │ sk-lf-aaa...    │  │ sk-lf-bbb...    │            │
+│  └────────▲────────┘  └────────▲────────┘            │
+│           │                    │                     │
+└───────────┼────────────────────┼─────────────────────┘
+            │                    │
+   ┌────────┴────────┐   ┌───────┴─────────┐
+   │ horragor-project│   │ autre-projet-llm│
+   │ (clés HorRAGor) │   │ (clés Chatbot)  │
+   └─────────────────┘   └─────────────────┘
+   ```
+Chaque projet a ses clés uniques (pk-lf-... / sk-lf-...). C'est la clé qui aiguille les traces vers le bon projet dans l'interface. Les traces ne se mélangent jamais.
+
+A noter que Langfuse a besoin de PostgreSQL, ClickHouse et Redis :
+- PostgreSQL → stocke les projets, users, clés API
+- ClickHouse → base analytique ultra-rapide pour stocker les millions de traces/tokens
+- Redis → cache et file d'attente pour absorber les pics de traces
+
+Actions a faire :
+1. Créer un dossier de travail "langfuse" (en dehors de horragor-project)
+2. Entrer dans ce dossier =>  ` cd langfuse `
+3. Cloner le dépôt officiel de Langfuse  
+` git clone https://github.com/langfuse/langfuse.git `
+4. Lance Langfuse (ça télécharge PostgreSQL, ClickHouse, Redis... sois patient)  
+` docker compose up -d `  
+    Note 1 j ai eu un probleme car Windows limite a 260 caractères les chemins de fichiers.  
+    solution :
+    - Activer les chemins longs dans Git => Ouvrir un terminal en administrateur et lancer : ` git config --global core.longpaths true `
+    - supprimer le dossier langfuse car cassé 
+    - et recreer ce dossier et recloner 
+
+    Note 2 j ai eu un autre probleme le port 5432 etait deja utilisé:  
+    "Error response from daemon: ports are not available: exposing port TCP 127.0.0.1:5432 -> 127.0.0.1:0: listen tcp4 127.0.0.1:5432: bind: An attempt was made to access a socket in a way forbidden by its access permissions."  
+    Cause : un PostgreSQL local (ou un autre conteneur) occupe déjà le port 5432 sur
+    l'hôte.
+
+    Solution — dans le `docker-compose.yml` de Langfuse, service `postgres` :
+        ```
+        postgres:
+            image: postgres:17
+            ...
+            ports:
+            - 127.0.0.1:5432:5432    # AVANT
+        ```
+    - Changer uniquement le port de gauche en 5433
+        ```
+        ports:
+            - 127.0.0.1:5433:5432    # APRÈS
+        ```
+    - Sauvegarder (Ctrl+S) et relance
+        ```
+        docker compose down
+        docker compose up -d
+        ```
+        Quelques remarques sur le fichier `docker-compose.yml` :  
+        ⚠️ Note sécurité — valeurs par défaut
+
+        Cette installation utilise les secrets par défaut du docker-compose.yml
+        (marqués `# CHANGEME`). Acceptable en local, à changer impérativement
+        avant toute exposition réseau ou mise en production :
+
+        - SALT, NEXTAUTH_SECRET : `openssl rand -base64 32`
+        - ENCRYPTION_KEY : `openssl rand -hex 32`
+        - POSTGRES_PASSWORD, REDIS_AUTH, CLICKHOUSE_PASSWORD : mots de passe forts
+
+        ⚠️ Changer ENCRYPTION_KEY après avoir créé des clés API rend celles-ci
+        illisibles. Le faire AVANT le premier démarrage, ou repartir d'un
+        `docker compose down -v`.
+
+   - Vérifier que tout tourne ` docker compose ps `  
+        → les 6 services doivent être Up, et postgres/clickhouse/redis/minio (healthy)
+   - Ouvrir http://localhost:3000 dans le navigateur (on voit la page de connexion Langfuse)
+
+    Note 3 — "Cette page ne fonctionne pas" : Langfuse pointait vers une base
+    Supabase distante
+
+    Diagnostic : ` docker compose logs langfuse-web `  
+    Sortie :  
+        ```
+        Datasource "db": PostgreSQL database "postgres", schema "public"
+        at "aws-1-eu-central-1.pooler.supabase.com:5432"
+        Error: P3005 The database schema is not empty.
+        ```
+
+    Cause : des variables DATABASE_URL / DIRECT_URL d'un autre projet
+    (Supabase) étaient présentes dans l'environnement et écrasaient les valeurs par
+    défaut du docker-compose.yml. Résultat : Prisma tentait ses migrations sur une
+    base distante déjà remplie → boucle infinie de crashs.
+
+    ⚠️ Piège à éviter : ne PAS créer de fichier .env à partir de
+    .env.dev.example. Ce fichier est destiné au développement local hors Docker
+    (les hosts y sont localhost, pas les noms de services Docker). Docker Compose
+    lit automatiquement tout .env présent dans le dossier et ses valeurs
+    localhost écrasent les bonnes valeurs → le conteneur ne trouve plus la base.
+    Le docker-compose.yml officiel de Langfuse est auto-suffisant : il contient
+    déjà toutes les variables nécessaires avec les bons hosts Docker.
+
+    Solution :
+      1) S'il existe un .env dans le dossier langfuse/, le renommer pour que
+     Docker Compose l'ignore : ` ren .env .env.local ` => perso j ai renommer en ` .env.local `
+      2) Supprimer toute directive env_file ajoutée dans le docker-compose.yml :
+          ```
+          langfuse-web:
+              image: docker.io/langfuse/langfuse:3
+              restart: always
+              env_file:          # ← SUPPRIMER CES 2 LIGNES
+              - .env           # ← SUPPRIMER
+              environment:
+              ...
+          ```
+     3) Vérifier qu'aucune variable ne traîne dans l'environnement Windows :
+          ```
+          echo %DATABASE_URL%
+          echo %DIRECT_URL%
+          ```
+          → doit afficher littéralement %DATABASE_URL% (= variable inexistante).
+          Sinon : set DATABASE_URL= et set DIRECT_URL=
+
+
+     4) (Optionnel (ce que je n ai pas fait), pour verrouiller définitivement) Écrire les valeurs en dur dans le docker-compose.yml, sans la syntaxe ${...} qui autorise
+     l'écrasement par une variable externe. Dans le bloc environment de
+     langfuse-web ET dans l'ancre &langfuse-worker-env :
+          ```
+          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+          DIRECT_URL: postgresql://postgres:postgres@postgres:5432/postgres
+          ```
+     5) Vérifier la config résolue par Docker Compose avant de lancer :  
+      ` docker compose config | findstr DATABASE_URL `  
+      → doit afficher @postgres:5432 (et non localhost ni une URL Supabase).
+
+      Note 4 — Le conteneur restait bloqué sur localhost:5432 malgré la correction
+      Symptôme déroutant : docker compose config affichait la bonne valeur
+      (@postgres:5432) mais le conteneur continuait à crasher avec
+      Can't reach database server at localhost:5432.
+
+      Vérification : ` docker inspect langfuse-langfuse-web-1 --format "{{json .Config.Env}}" | findstr /i DATABASE_URL `  
+
+      → affichait encore @localhost:5432
+
+      Cause : les variables d'environnement sont injectées à la création du
+      conteneur, jamais à son redémarrage. Le conteneur crashait en boucle
+      (restart: always) et Docker le relançait sans jamais le recréer → il gardait
+      figée la config du premier lancement, quand le .env fautif était encore lu.
+
+      Solution :  
+        ```
+        docker compose down -v --remove-orphans
+        docker ps -a --filter "name=langfuse"      # doit ne rien retourner
+        docker compose up -d --force-recreate
+        ```
+
+      Vérifier que le nouveau conteneur a bien la bonne config : ` docker inspect langfuse-langfuse-web-1 --format "{{json .Config.Env}}" | findstr /i DATABASE_URL `  
+      → DATABASE_URL=postgresql://postgres:postgres@postgres:5432/postgres ✅
+
+      Réflexe de debug à retenir : quand un conteneur semble ignorer une
+      correction de configuration, comparer
+      - docker compose config → la config théorique (fichiers YAML + .env
+      - docker inspect <conteneur> → la config réelle du conteneur qui tourne
+
+      Si les deux divergent, le conteneur est obsolète : il faut le recréer, pas le redémarrer.
+
+      | Commande | Recrée le conteneur ? |
+      |---|---|
+      | `docker compose restart` | ❌ Non — relance le process, config figée |
+      | `docker compose up -d` | ⚠️ Seulement si Compose détecte un changement |
+      | `docker compose up -d --force-recreate` | ✅ Toujours |
+      | `docker compose down` + `up -d` | ✅ Oui (sauf conteneurs orphelins) |
+
+5) Vérifier les logs jusqu'au démarrage complet :  
+   ` docker compose logs -f langfuse-web `  
+   Attendre ✓ Ready in XXXXms (le premier lancement prend 1 à 3 minutes : migrations PostgreSQL + ClickHouse).
+6) Ouvrir http://localhost:3000 → la page de connexion Langfuse s'affiche
+
+### étape B :  Créer un compte local + projet → récupérer les clés
+
+1. Créer le compte  
+    Cliquer sur « No account yet? Sign up » (lien sous le formulaire) et remplir :
+
+    | Champ | Valeur suggérée |
+    |---|---|
+    | **Name** | nicolas tchenio |
+    | **Email** | `nicolas.tchenio@gmail.com` (aucun mail n'est envoyé, pas de vérification) |
+    | **Password** | 8 caractères minimum => ` m@tdepasse123 ` — **noter-le**, pas de reset possible sans SMTP configuré |
+
+    → Sign up  
+    💡 Comme aucun serveur SMTP n'est configuré (SMTP_CONNECTION_URL est vide), il n'y a ni mail de confirmation ni récupération de mot de passe. Garde ses identifiants quelque part.
+
+2. Créer l'organisation  
+    Langfuse demande de créer une organisation.
+    Organization name : Simplon (ou ce que tu veux)
+    → Create
+3. Inviter des membres  
+    Écran suivant : invitation de membres. Skip — je suis seul.
+4. Créer le projet  
+    Project name : HorRAGor
+    → Create
+5. Générer les clés API  
+    Sur le dashboard du projet, aller dans:  
+    Settings (menu latéral gauche) → API Keys → + Create new API key
+
+    - On obtient :
+
+        ```
+        Secret Key : sk-lf-9cd12075-9695-4229-be6d-0d38fdfb28c9   ← affichée UNE SEULE FOIS
+        Public Key : pk-lf-ad9c9977-cdec-402f-b3b8-eee965f4d213
+        Host       : http://localhost:3000
+        ```
+
+    - Copier les trois immédiatement dans le .env du projet HorRAGor (pas dans le dossier langfuse/) : 
+
+        ```
+        # .env  (à la racine de ton projet HorRAGor)  
+        LANGFUSE_SECRET_KEY=sk-lf-...  
+        LANGFUSE_PUBLIC_KEY=pk-lf-...  
+        LANGFUSE_HOST=http://localhost:3000
+        ```
+
+    - Mets à jour .env.example (documentation pour les autres)
+        ```
+        # .env.example
+
+        # ===== LANGFUSE =====
+        LANGFUSE_SECRET_KEY=sk-lf-your-secret-key-here
+        LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key-here
+        LANGFUSE_HOST=http://localhost:3000
+        ```
+
+    - Mets à jour .env.docker (pour Docker Compose)
+        ```
+        # .env.docker
+
+        # ===== LANGFUSE =====
+        LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        LANGFUSE_HOST=http://host.docker.internal:3000
+        ```
+
+### étape C : Installer le package Python `langfuse` | `pyproject.toml` | ### 
+Dans notre projet "horragor-project" ajouter le package avec uv ` uv add langfuse `
+
+### étape d : Ajouter les clés dans les fichiers .env ().env, .env.example, .env.docker)
+
+On a deux stacks différents dans les réseaux Docker  :
+- Langfuse → réseau par défaut du projet langfuse (dossier langfuse/)
+- HorRAGor → réseau horragor-net (bridge dédié)
+
+Deux options :
+- Option A — la plus simple (recommandée pour l'instant):  
+    Utiliser host.docker.internal, que l'on a déjà configuré pour Ollama dans intelligence-api :
+    ```
+    # .env.docker
+    LANGFUSE_HOST=http://host.docker.internal:3000
+    ```
+    Ça fonctionne car Langfuse expose bien 3000:3000 sur l'hôte. Et on a déjà dans "docker-compose.yml" :
+    ```
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
+    
+- Option B — réseau partagé (plus « propre », plus tard) :  
+Créer un réseau externe commun et le rattacher aux deux stacks. À garder pour une phase d'industrialisation.
+
+J' ai choisi l option A :
+- Le conteneur doit avoir été recréé après ta modif de .env.docker => ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate intelligence-api `
+- Vérifier les variables  :
+    ```
+    docker exec horragor-ia printenv LANGFUSE_HOST
+    docker exec horragor-ia printenv LANGFUSE_PUBLIC_KEY
+    docker exec horragor-ia printenv LANGFUSE_SECRET_KEY
+    ```
+    Attendu :
+    ```
+    http://host.docker.internal:3000
+    pk-lf-...
+    sk-lf-...
+    ```
+- Test de vérification :
+```
+# Depuis ton PC
+curl http://localhost:3000/api/public/health
+
+# Depuis le conteneur HorRAGor
+docker exec horragor-ia python -c "import httpx; print(httpx.get('http://host.docker.internal:3000/api/public/health').text)"
+```
+Les deux doivent répondre. Si le second échoue, c'est un souci de pare-feu Windows sur le port 3000.
+
+### étape E : Charger la config Langfuse dans le code
+Maintenant que les variables arrivent bien dans le conteneur, il faut que Python les lise. C'est le rôle de src/config.py.
+
+juste après la section Ollama / LLM pour respecter ta logique de regroupement thématique rajouter
+```
+# ─────────────────────────────────────────────
+# OBSERVABILITÉ — Langfuse (Phase 8.1)
+# ─────────────────────────────────────────────
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+
+# Le tracing ne s'active que si les DEUX clés sont renseignées.
+# → l'application reste 100 % fonctionnelle sans Langfuse (CI, tests, démo hors-ligne).
+LANGFUSE_ENABLED: bool = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
+```
+note ⚠️ Un piège lié à ta ligne 26 :  
+` load_dotenv(dotenv_path=_ENV_PATH, override=True) `  
+Le override=True signifie que le .env écrase les variables d'environnement Docker. En local hors conteneur c'est ce que l'on veut. Mais dans le conteneur, si un fichier .env était monté ou copié dans l'image, il écraserait les valeurs de .env.docker que tu viens de valider.
+Vérifier donc que .env n'est pas dans l'image :  
+` docker exec horragor-ia ls -la /app/.env `  
+→ Attendu : No such file or directory. Si le fichier existe, ajoute .env à ton .dockerignore.
+
+Test de validation de l'étape E :
+- Après la modification, Rebuild pour intégrer le nouveau config.py dans l'image : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+
+    A retenir toute modification dans src exige un rebuild car  Le volume src/ n'était pas monté dans mon"docker-compose.dev.yml".
+
+- puis : ` docker exec horragor-ia python -c "from src import config; print('HOST:', config.LANGFUSE_HOST); print('ENABLED:', config.LANGFUSE_ENABLED); print('PK ok:', config.LANGFUSE_PUBLIC_KEY.startswith('pk-lf-'))" `
+
+    Attendu :
+    ```
+    HOST: http://host.docker.internal:3000
+    ENABLED: True
+    PK ok: True
+    ```
+    Si ENABLED: False → les clés ne remontent pas jusqu'à Python → c'est le piège du override=True ci-dessus.
+
+### étape F, G, H	
+Langfuse s'intègre à LangGraph via un CallbackHandler : un objet qu'on passe dans le config de graph.invoke(). LangChain/LangGraph appellent alors automatiquement ce handler à chaque étape (début de nœud, appel LLM, fin, erreur) et Langfuse construit une trace hiérarchique :
+```
+Trace "horragor-chat"
+├── rag_node          (durée, input, output)
+│   └── OllamaEmbeddings   (tokens, latence)
+├── scraper_node      (si déclenché)
+└── narration_node
+    └── ChatOllama    (prompt complet, réponse, tokens)
+```
+Le principe clé : on ne touche pas aux nœuds. Toute l'instrumentation se fait au point d'entrée (src/main.py), là où on invoque le graphe. C'est ce qui rend Langfuse non-intrusif.
+
+| Choix technique | Justification |
+|---|---|
+| **Module dédié `observability/`** | Découplage : le code métier ne connaît pas Langfuse. Changer d'outil = modifier un seul fichier. |
+| **Dégradation gracieuse** | L'observabilité ne peut pas faire tomber la production. Trois niveaux de garde-fou (config, import, instanciation). |
+| **`flush()` au shutdown** | Le buffer est asynchrone : sans flush, les dernières traces sont perdues à l'arrêt du conteneur. |
+
+1) Créer un dossier "src/observability/" avec un
+   - "__init__.py" vide
+   - "langfuse_client.py" 
+    Ce module isole toute la logique Langfuse. Avantage : si Langfuse est indisponible ou désactivé, l'application continue de fonctionner normalement (dégradation gracieuse).
+    etape F helper Langfuse => avec get_langfuse_handler() et flush_langfuse()
+2) Modifier "src/main.py" :  
+étape G brancher le callback
+   - Ajouter l'import (après from src.auth.security import verify_access_token)
+       ```
+       # ═══════════════════════════════════════════════════════════════
+       # Observabilité (Phase 8) — import non bloquant
+       # ═══════════════════════════════════════════════════════════════
+       # Ce module ne lève jamais d'exception : si Langfuse est indisponible,
+       # get_langfuse_handler() retourne None et l'agent fonctionne normalement.
+       from src.observability.langfuse_client import (
+           flush_langfuse,
+           get_langfuse_handler,
+       )
+       ```
+   - Modifier le lifespan pour vider le buffer à l'extinction
+       ```
+       @asynccontextmanager
+       async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+           """Cycle de vie de l'application FastAPI.
+
+           **Au démarrage** : compile le graphe LangGraph une seule fois et
+           initialise le handler Langfuse (les logs indiquent s'il est actif).
+
+           **À l'extinction** : force l'envoi des traces Langfuse encore en
+           mémoire tampon, afin de ne perdre aucune observation.
+           """
+           global _compiled_graph
+
+           # ── DÉMARRAGE ──
+           print("🕯️  Compilation du graphe HorRAGor...")
+           _compiled_graph = build_horragor_graph()
+           print("✅ Graphe compilé et prêt.")
+
+           # Initialisation anticipée de l'observabilité : provoque l'affichage
+           # du log "✅ Langfuse actif" (ou de l'avertissement) dès le boot,
+           # plutôt qu'à la première requête utilisateur.
+           get_langfuse_handler()
+
+           yield  # ─── L'application sert les requêtes ici ───
+
+           # ── EXTINCTION ──
+           # Le buffer Langfuse est asynchrone : sans ce flush, les dernières
+           # traces seraient perdues à l'arrêt du conteneur.
+           flush_langfuse()
+           print("🌙 Extinction du serveur HorRAGor.")
+       ```
+       Adapte les print à ce que contient déjà ton lifespan — garde ta logique existante, ajoute seulement get_langfuse_handler() avant le yield et flush_langfuse() après.
+
+   - Injecter le handler dans chat_endpoint :
+       Remplacer la ligne actuelle : ` config = {"configurable": {"thread_id": thread_id}}`
+
+       par ce bloc :
+       ```
+       # ═══════════════════════════════════════════════════════════════
+       # Configuration LangGraph + Observabilité Langfuse
+       # ═══════════════════════════════════════════════════════════════
+       # `configurable.thread_id` : clé du checkpointer (mémoire de session).
+       # `callbacks`              : liste de handlers LangChain. Langfuse y
+       #                            observe automatiquement chaque nœud du
+       #                            graphe et chaque appel LLM/embedding.
+       # `metadata`               : enrichissements visibles dans l'UI
+       #                            Langfuse, très utiles pour filtrer les
+       #                            traces (par utilisateur, par session).
+       # `run_name`               : nom lisible de la trace dans l'UI.
+       # ═══════════════════════════════════════════════════════════════
+       langfuse_handler = get_langfuse_handler()
+
+       graph_config: dict[str, Any] = {
+           "configurable": {"thread_id": thread_id},
+           "run_name": "horragor-chat",
+           "metadata": {
+               # Préfixes spéciaux reconnus par Langfuse pour alimenter
+               # ses filtres natifs dans l'interface web :
+               "langfuse_user_id": username,
+               "langfuse_session_id": thread_id,
+               "langfuse_tags": ["horragor", "rag", "production"],
+           },
+       }
+
+       # On n'ajoute la clé `callbacks` que si le handler existe, afin de
+       # ne jamais passer [None] à LangGraph (qui lèverait une erreur).
+       if langfuse_handler is not None:
+           graph_config["callbacks"] = [langfuse_handler]
+       ```
+
+       Puis, dans l'invocation juste en dessous, remplace config par graph_config :
+       ```
+           try:
+               final_state: AgentState = await asyncio.to_thread(
+                   _compiled_graph.invoke,
+                   initial_state,
+                   graph_config,   # ← anciennement `config`
+               )
+       ```
+       Pourquoi renommer config en graph_config ? Parce que ton module importe déjà from src import config (indirectement, via src.api.auth). Une variable locale nommée config masque le module et rend le code ambigu. Ce renommage est une bonne pratique de lisibilité.
+
+3) Modifier "src/config.py"
+
+    Dans le bloc langfuse rajouter :
+    ```
+    # Le SDK cherche LANGFUSE_HOST dans os.environ. On réinjecte la valeur
+    # résolue (avec son défaut) pour couvrir le cas où la variable n'était
+    # pas définie du tout dans l'environnement.
+    os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST
+    ###
+    ```
+
+4) Tests:
+   - verifier que le paquet langfuse est bien dans mes dépendances :  ` docker exec horragor-ia python -c "import langfuse; print(langfuse.__version__)" `
+   - rebuild : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+   - apres le rebuild : ` docker logs horragor-ia --tail 50 `
+   - test :
+        ```
+        REM 4. Obtenir un token JWT
+        curl -k -X POST https://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"TON_USER\",\"password\":\"TON_PASS\"}"
+        ```
+        Note pour avoir le username et password ce sont ceux que j'ai définis en Phase 7.2 (=> admin et motdepasse123 )
+        Si oublie faire : ` docker exec horragor-ia printenv | findstr AUTH `
+
+        ```
+        REM 5. Envoyer un message (remplace <TOKEN>)
+        curl -k -X POST https://localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <TOKEN>" -d "{\"message\":\"Parle-moi de The Exorcist\"}"
+        ```
+        Puis ouvre http://localhost:3000 → menu Tracing → tu dois voir une trace horragor-chat, dépliable nœud par nœud.
