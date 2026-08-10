@@ -5,11 +5,23 @@ Ce module expose deux routes :
   - POST /auth/refresh : échange refresh_token → nouveau access_token
 
 C'est le seul point d'entrée pour obtenir des tokens valides.
+
+Traçabilité
+-----------
+Toutes les tentatives d'authentification (réussies et échouées) sur
+``/auth/login`` et ``/auth/refresh`` sont journalisées à des fins de
+sécurité (détection de brute-force, audit d'accès). Les logs ne
+contiennent **jamais** de secrets en clair : ni mot de passe, ni
+access_token, ni refresh_token complet. Seuls le username, la durée
+de traitement et la raison d'échec sont tracés.
 """
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, HTTPException, status
+from loguru import logger
 from pydantic import BaseModel
 
 from src import config
@@ -24,7 +36,6 @@ from src.auth.security import (
 # Routeur
 # ═══════════════════════════════════════════════════════════════
 router = APIRouter(prefix="/auth", tags=["auth"])
-
 
 # ═══════════════════════════════════════════════════════════════
 # Schémas Pydantic (req/resp)
@@ -70,8 +81,14 @@ async def login(req: LoginRequest) -> TokenResponse:
     :param req: ``LoginRequest`` contenant ``username`` et ``password``.
     :returns: ``TokenResponse`` avec les deux tokens signés.
     """
+    start = time.perf_counter()
+    logger.info(f"[Auth] Tentative de login : username='{req.username}'")
+
     # Vérifie l'identité
     if req.username != config.AUTH_USERNAME:
+        logger.warning(
+            f"[Auth] Échec login — username inconnu : '{req.username}'"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Nom d'utilisateur ou mot de passe incorrect.",
@@ -79,12 +96,19 @@ async def login(req: LoginRequest) -> TokenResponse:
 
     # Vérifie le mot de passe
     if not config.AUTH_PASSWORD_HASH:
+        logger.error(
+            "[Auth] Configuration serveur invalide — AUTH_PASSWORD_HASH "
+            "non défini. Impossible de vérifier le mot de passe."
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="AUTH_PASSWORD_HASH non configuré. Vérifiez le .env",
         )
 
     if not verify_password(req.password, config.AUTH_PASSWORD_HASH):
+        logger.warning(
+            f"[Auth] Échec login — mot de passe incorrect pour '{req.username}'"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Nom d'utilisateur ou mot de passe incorrect.",
@@ -93,6 +117,12 @@ async def login(req: LoginRequest) -> TokenResponse:
     # Crée les tokens
     access_token = create_access_token(subject=req.username)
     refresh_token = create_refresh_token(subject=req.username)
+
+    elapsed = (time.perf_counter() - start) * 1000
+    logger.success(
+        f"[Auth] Login réussi pour '{req.username}' — tokens émis, "
+        f"durée={elapsed:.2f}ms"
+    )
 
     return TokenResponse(
         access_token=access_token,
@@ -119,9 +149,17 @@ async def refresh(req: RefreshRequest) -> TokenResponse:
     :param req: ``RefreshRequest`` contenant le ``refresh_token``.
     :returns: ``TokenResponse`` avec un nouvel access_token et le même refresh_token.
     """
+    start = time.perf_counter()
+    token_preview = (req.refresh_token or "")[:10] + "..."
+    logger.info("[Auth] Tentative de refresh token")
+    logger.debug(f"[Auth] Refresh token (tronqué) : '{token_preview}'")
+
     try:
         payload = decode_token(req.refresh_token, expected_type="refresh")
     except Exception as exc:
+        logger.warning(
+            f"[Auth] Échec refresh — token invalide ou expiré : {exc}"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Refresh token invalide ou expiré : {exc}",
@@ -132,6 +170,12 @@ async def refresh(req: RefreshRequest) -> TokenResponse:
 
     # Crée un nouvel access_token avec la même identité
     new_access_token = create_access_token(subject=username)
+
+    elapsed = (time.perf_counter() - start) * 1000
+    logger.success(
+        f"[Auth] Refresh réussi pour '{username}' — nouvel access_token émis, "
+        f"durée={elapsed:.2f}ms"
+    )
 
     return TokenResponse(
         access_token=new_access_token,

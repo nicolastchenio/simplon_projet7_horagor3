@@ -1,34 +1,162 @@
-# .dockerignore
-.env
-.env.*
-!.env.example
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.git/
-.gitignore
-*.md
-tests/
-docs/# .dockerignore
-.env
-.env.*
-!.env.example
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.git/
-.gitignore
-*.md
-tests/
-docs/
+# ==============================================================================
+# .dockerignore — Fichier d'exclusion pour le build Docker
+# ==============================================================================
+# Empêche l'inclusion de fichiers inutiles ou sensibles dans l'image Docker,
+# réduisant ainsi sa taille et améliorant la sécurité.
+# ==============================================================================
 
-# ==============================================
-# Certificats TLS (Phase 7.3)
-# ==============================================
-# Les certificats sont injectés via un VOLUME monté dans docker-compose,
-# jamais copiés dans l'image (évite de "cuire" un secret dans une image
-# potentiellement poussée sur un registry).
-certs/
+# ------------------------------------------------------------------------------
+# Section 1 — Fichiers secrets et credentials (JAMAIS dans l'image)
+# ------------------------------------------------------------------------------
+# Ne JAMAIS inclure de secrets ou credentials dans l'image Docker
+.env
+.env.*
+.env.local
+*.env
 *.pem
+*.key
+credentials.json
+service_account.json
+
+# Certificats TLS et fichiers sensibles liés à la sécurité
+*.crt
+*.p12
+*.pfx
+tls/
+certs/
+
+# ------------------------------------------------------------------------------
+# Section 2 — Contrôle de version Git
+# ------------------------------------------------------------------------------
+# Le Dockerfile fait un COPY propre, pas besoin du historique Git
+.git
+.gitignore
+.gitattributes
+
+# ------------------------------------------------------------------------------
+# Section 3 — Caches Python et outils de linting
+# ------------------------------------------------------------------------------
+# Bytecode Python (régénéré à l'installation)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches des outils de qualité de code
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build artifacts Python
+*.egg-info/
+dist/
+build/
+eggs/
+
+# ------------------------------------------------------------------------------
+# Section 4 — Environments virtuels
+# ------------------------------------------------------------------------------
+# Les dépendances sont gérées par UV dans le container
+venv/
+ENV/
+env/
+.venv/
+
+# ------------------------------------------------------------------------------
+# Section 5 — Logs et fichiers temporaires
+# ------------------------------------------------------------------------------
+# Logs de l'application (à gérer par le container via stdout/stderr)
+logs/
+*.log
+*.log.*
+loguru_*.log
+
+# Fichiers temporaires
+temp/
+tmp/
+*.tmp
+*.temp
+
+# ------------------------------------------------------------------------------
+# Section 6 — Données volumineuses (non nécessaires dans l'image)
+# ------------------------------------------------------------------------------
+# Index FAISS (générés au runtime ou montés en volume)
+data/*.faiss
+data/*.index
+
+# Fichiers de donnéespickle
+data/*.pkl
+data/*.pickle
+
+# Fichiers numpy
+data/*.npy
+data/*.npz
+
+# Autres formats de données
+data/*.parquet
+data/*.h5
+data/*.hdf5
+data/*.feather
+data/*.csv
+data/*.txt
+data/*.json
+data/*.jsonl
+
+# Garder les scripts de build des index (exécutés au démarrage)
+# !data/build_faiss_index.py  # Décommenter si nécessaire
+
+# ------------------------------------------------------------------------------
+# Section 7 — Observabilité Langfuse (cache local)
+# ------------------------------------------------------------------------------
+# Le cache Langfuse ne doit pas être inclus dans l'image
+.langfuse/
+.langfuse_cache/
+
+# ------------------------------------------------------------------------------
+# Section 8 — Scripts de développement
+# ------------------------------------------------------------------------------
+# Scripts de dev, migrations, et utilitaires (inutile en production)
+scripts/
+dev/
+tests/  # Les tests ne sont pas exécutés en production (inclus via test stage si besoin)
+
+# ------------------------------------------------------------------------------
+# Section 9 — Documentation et configuration non nécessaire en production
+# ------------------------------------------------------------------------------
+# README et documentation (si non nécessaire au runtime)
+README*
+docs/
+*.md
+LICENSE
+
+# Fichiers de configuration Docker dev (déjà filtrés via .env)
+docker-compose*.yml
+docker-compose*.yaml
+
+# Configurations de développement
+.DS_Store
+*.swp
+*.swo
+
+# ------------------------------------------------------------------------------
+# Section 10 — Cache et métadonnées
+# ------------------------------------------------------------------------------
+# Cache système et navigateur
+.cache/
+.npm/
+.yarn/
+
+# Fichiers de verrouillage
+*.lock
+poetry.lock
+uv.lock
+
+# Node modules (si applicable)
+node_modules/
+
+# ------------------------------------------------------------------------------
+# Section 11 — Claude code
+# ------------------------------------------------------------------------------
+CLAUDE.md

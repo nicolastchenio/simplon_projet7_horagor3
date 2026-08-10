@@ -8,7 +8,16 @@ services:
     # Ajoute l'accès direct pour tester /docs et Postman
     ports:
       - "8001:8001"
+    # Persistance des logs (Phase 8.2, item 21) : visibles sur l'hôte dans ./logs/
+    volumes:
+      - ./logs:/app/logs
 
   intelligence-api:
     ports:
       - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+
+  frontend:
+    volumes:
+      - ./logs:/app/logs

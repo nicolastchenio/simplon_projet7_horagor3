@@ -9,13 +9,16 @@ Ce module gère :
 """
 
 import os
+import time
 import uuid
 import json
 import base64
 from datetime import datetime, timedelta
 import httpx
 import streamlit as st
+from loguru import logger
 from src.config import API_BASE_URL, API_TIMEOUT
+from observability.logging_config import setup_logging
 
 # 🔴 DOIT ÊTRE AVANT TOUT AUTRE CODE STREAMLIT
 st.set_page_config(
@@ -24,6 +27,21 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ============================================================================
+# LOGGING (Phase 8.2)
+# ============================================================================
+# Streamlit ré-exécute tout ce script à chaque interaction utilisateur
+# (clic, saisie...). st.cache_resource garantit que setup_logging() ne
+# s'exécute qu'une seule fois par process, pas à chaque rerun.
+
+
+@st.cache_resource
+def _init_logging() -> None:
+    setup_logging()
+
+
+_init_logging()
 
 # ============================================================================
 # CONFIGURATION TLS (Phase 7.3)
@@ -71,7 +89,7 @@ def decode_jwt_payload(token: str) -> dict | None:
         return json.loads(decoded)
 
     except Exception as e:
-        print(f"❌ Erreur décodage JWT : {e}")
+        logger.error(f"❌ Erreur décodage JWT : {e}")
         return None
 
 
@@ -202,6 +220,7 @@ def login(username: str, password: str) -> bool:
             st.session_state.access_token = data["access_token"]
             st.session_state.refresh_token = data["refresh_token"]
             st.session_state.user = username
+            logger.bind(username=username).info("[auth] Login réussi")
             return True
 
     except httpx.HTTPStatusError as exc:
@@ -210,10 +229,12 @@ def login(username: str, password: str) -> bool:
             detail = exc.response.json().get("detail", detail)
         except Exception:
             pass
+        logger.bind(username=username).warning(f"[auth] Login échoué : {detail}")
         st.error(f"❌ Erreur de connexion : {detail}")
         return False
 
     except Exception as exc:
+        logger.bind(username=username).error(f"[auth] Login échoué (erreur inattendue) : {exc}")
         st.error(f"❌ Erreur inattendue : {exc}")
         return False
 
@@ -233,6 +254,7 @@ def refresh_access_token() -> bool:
 
     url = f"{API_BASE_URL}/auth/refresh"
     payload = {"refresh_token": st.session_state.refresh_token}
+    username = st.session_state.user
 
     try:
         # 🔒 MODIFICATION TLS : ajout de verify=SSL_VERIFY
@@ -244,9 +266,11 @@ def refresh_access_token() -> bool:
             st.session_state.access_token = data["access_token"]
             if "refresh_token" in data:
                 st.session_state.refresh_token = data["refresh_token"]
+            logger.bind(username=username).info("[auth] Token rafraîchi")
             return True
 
-    except Exception:
+    except Exception as exc:
+        logger.bind(username=username).warning(f"[auth] Échec du rafraîchissement du token : {exc}")
         return False
 
 
@@ -293,6 +317,9 @@ def call_chat_api(question: str, thread_id: str) -> dict | None:
         if refresh_access_token():
             st.info("🔄 Token renouvelé automatiquement.")
         else:
+            logger.bind(conversation_thread_id=thread_id).warning(
+                "[chat] Token expiré, refresh impossible — déconnexion"
+            )
             st.error("❌ Impossible de renouveler le token. Reconnexion nécessaire.")
             logout()
             st.rerun()
@@ -309,29 +336,51 @@ def call_chat_api(question: str, thread_id: str) -> dict | None:
         "Authorization": f"Bearer {st.session_state.access_token}",
     }
 
+    logger.bind(conversation_thread_id=thread_id).debug(
+        f"[chat] Envoi de la question ({len(question)} caractères)"
+    )
+    start = time.perf_counter()
+
     try:
         # 🔒 MODIFICATION TLS : ajout de verify=SSL_VERIFY
         with httpx.Client(timeout=API_TIMEOUT, verify=SSL_VERIFY) as client:
             resp = client.post(url, headers=headers, json=payload)
 
             if resp.status_code == 200:
+                duration_ms = (time.perf_counter() - start) * 1000
+                logger.bind(conversation_thread_id=thread_id, duration_ms=round(duration_ms, 2)).info(
+                    f"[chat] Réponse reçue en {duration_ms:.2f} ms"
+                )
                 return resp.json()
 
             elif resp.status_code == 401:
                 # Token expiré → essai de refresh + retry
+                logger.bind(conversation_thread_id=thread_id).info(
+                    "[chat] Token expiré (401), tentative de refresh"
+                )
                 st.info("🔄 Token expiré, renouvellement en cours...")
 
                 if refresh_access_token():
                     headers["Authorization"] = f"Bearer {st.session_state.access_token}"
                     resp = client.post(url, headers=headers, json=payload)
                     if resp.status_code == 200:
+                        duration_ms = (time.perf_counter() - start) * 1000
+                        logger.bind(conversation_thread_id=thread_id, duration_ms=round(duration_ms, 2)).info(
+                            f"[chat] Réponse reçue après refresh en {duration_ms:.2f} ms"
+                        )
                         return resp.json()
                     else:
+                        logger.bind(conversation_thread_id=thread_id).error(
+                            "[chat] Échec après refresh — déconnexion"
+                        )
                         st.error("❌ Impossible de se reconnecter après refresh.")
                         logout()
                         st.rerun()
                         return None
                 else:
+                    logger.bind(conversation_thread_id=thread_id).warning(
+                        "[chat] Session expirée, refresh impossible — déconnexion"
+                    )
                     st.error("❌ Votre session a expiré. Reconnexion nécessaire.")
                     logout()
                     st.rerun()
@@ -342,14 +391,19 @@ def call_chat_api(question: str, thread_id: str) -> dict | None:
                     detail = resp.json().get("detail", detail)
                 except Exception:
                     pass
+                logger.bind(conversation_thread_id=thread_id, status_code=resp.status_code).error(
+                    f"[chat] Erreur {resp.status_code} : {detail}"
+                )
                 st.error(f"❌ Erreur {resp.status_code} : {detail}")
                 return None
 
     except httpx.ConnectError:
+        logger.bind(conversation_thread_id=thread_id).error("[chat] Backend inaccessible (ConnectError)")
         st.error("❌ Impossible de joindre le backend (hors ligne).")
         return None
 
     except Exception as exc:
+        logger.bind(conversation_thread_id=thread_id).error(f"[chat] Erreur inattendue : {exc}")
         st.error(f"❌ Erreur inattendue : {exc}")
         return None
 
@@ -587,8 +641,12 @@ def main() -> None:
     init_session_state()
 
     if not st.session_state.access_token:
+        logger.debug("[main] Page affichée : login")
         show_login_page()
     else:
+        logger.bind(user=st.session_state.user, thread_id=st.session_state.thread_id).debug(
+            "[main] Page affichée : chat"
+        )
         show_chat_page()
 
 

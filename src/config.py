@@ -87,6 +87,37 @@ API_TIMEOUT: int = int(os.getenv("API_TIMEOUT", "30"))
 API_BASE_URL: str = os.getenv("API_BASE_URL", f"http://localhost:{API_PORT}")
 
 # ═══════════════════════════════════════════════════════════════
+# Loguru — Journalisation structurée (Phase 8.2)
+# ═══════════════════════════════════════════════════════════════
+# Centralisation de la configuration Loguru pour instrumenter
+# de bout en bout la traçabilité des requêtes, décisions et
+# appels d'outils à travers les 3 couches (Données, Intelligence,
+# Présentation).
+#
+# Les logs sont écrits en JSON pour parsing par les stacks de
+# monitoring (Prometheus/Grafana/Uptime Kuma/Langfuse).
+# ═══════════════════════════════════════════════════════════════
+
+# Niveau de log : DEBUG (dev local), INFO (prod)
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG")
+
+# Répertoire de persistance des fichiers logs
+LOG_DIR: Path = Path(os.getenv("LOG_DIR", PROJECT_ROOT / "logs"))
+
+# Format des logs : JSON (structuré) ou texte (lisible)
+# JSON est requis pour Prometheus/Grafana/Uptime Kuma
+LOG_JSON: bool = os.getenv("LOG_JSON", "true").lower() in ("true", "1", "yes")
+
+# Rotation des fichiers logs : taille max avant création d'un nouveau
+LOG_FILE_MAX_BYTES: int = int(os.getenv("LOG_FILE_MAX_BYTES", "52428800"))  # 50 MB
+
+# Nombre max de fichiers logs à conserver avant suppression des anciens
+LOG_FILE_BACKUP_COUNT: int = int(os.getenv("LOG_FILE_BACKUP_COUNT", "5"))
+
+# Créer le répertoire logs s'il n'existe pas
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# ═══════════════════════════════════════════════════════════════
 # Outils externes (Scraper, etc.)
 # ═══════════════════════════════════════════════════════════════
 REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "10"))

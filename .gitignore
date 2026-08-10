@@ -1,132 +1,193 @@
-# ==============================================
-# UV / Virtualenv
-# ==============================================
-.venv/
-uv.lock
-.python-version
+# ==============================================================================
+# .gitignore — Fichier d'exclusion Git pour le projet RAG Horagor3
+# ==============================================================================
+# Ce fichier empêche le suivi des fichiers temporaires, caches, et données
+# générées automatiquement qui ne doivent pas être versionnés.
+# ==============================================================================
 
-# ==============================================
-# Python
-# ==============================================
+# ------------------------------------------------------------------------------
+# Section 1 — Gestionnaire de paquets UV (Python)
+# ------------------------------------------------------------------------------
+# Les fichiers générés par UV (résolution de dépendances)
+__pypackages__/
+.pip-cache/
+.uv/
+
+# ------------------------------------------------------------------------------
+# Section 2 — Langage Python
+# ------------------------------------------------------------------------------
+# Bytecode Python standard
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
+
+# Fichiers de distribution Python
 *.egg
+*.egg-info/
+dist/
+build/
+eggs/
+*.whl
 
-# ==============================================
-# OS
-# ==============================================
-.DS_Store
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-.Trashes
-.Trash-*
-.vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# ==============================================
-# IDE
-# ==============================================
-# VS Code
-.vscode/
-
-# PyCharm / IntelliJ
-.idea/
-*.iml
-
-# ==============================================
-# Data & Models
-# ==============================================
-# Dossier d'index FAISS généré automatiquement (binaire, lourd, régénérable)
-data/faiss_index/
-
-# Fichiers binaires et sérialisés générés par les scripts
-data/*.faiss
-data/*.pkl
-data/*.bin
-
-# Dumps de données et embeddings intermédiaires
-data/*.json
-data/*.npy
-data/*.npz
-
-# Conservation explicite des scripts source dans data/
-!data/.gitkeep
-!data/build_faiss_index.py
-
-# Ollama model cache (local models)
-ollama/
-.ollama/
-
-# ==============================================
-# Logs & Coverage
-# ==============================================
-logs/
-*.log
-
-# Pytest
+# Caches et outils de qualité de code Python modernes
+.mypy_cache/
+.ruff_cache/
 .pytest_cache/
 .coverage
 htmlcov/
-.tox/
-.mypy_cache/
-.ruff_cache/
+*.cover
 
-# ==============================================
-# Environment Secrets
-# ==============================================
+# Environments virtuels
+venv/
+ENV/
+env/
+.venv/
+
+# ------------------------------------------------------------------------------
+# Section 3 — Système d'exploitation
+# ------------------------------------------------------------------------------
+# Fichiers système couramment générés (macOS, Windows, Linux)
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# Fichiers de bureau Linux
+*~
+
+# ------------------------------------------------------------------------------
+# Section 4 — Environnements et secrets (NE JAMAIS VERSIONNER)
+# ------------------------------------------------------------------------------
+# Variables d'environnement containant des secrets
 .env
-.env.*
-!.env.example
+.env.local
+.env.*.local
+.env.docker
+*.env
 
-# Streamlit secrets
-.streamlit/secrets.toml
-
-# ==============================================
-# Certificats TLS (Phase 7.3)
-# ==============================================
-# La clé privée (key.pem) et le certificat auto-signé (cert.pem) ne
-# doivent JAMAIS être versionnés : ce sont des secrets locaux, régénérables
-# à tout moment via `python scripts/generate_cert.py`.
-certs/
+# Fichiers de credentials et secrets
 *.pem
 *.key
+credentials.json
+service_account.json
+
+# Certificats TLS (NE JAMAIS COMMITER)
 *.crt
+*.p12
+*.pfx
+tls/
+certs/
 
-# ==============================================
-# Jupyter
-# ==============================================
-.ipynb_checkpoints/
-*.ipynb
+# ------------------------------------------------------------------------------
+# Section 5 — Outils de développement et IDE
+# ------------------------------------------------------------------------------
+# Principaux IDEs (VS Code, PyCharm, vim, emacs)
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
 
-# ==============================================
-# Langfuse
-# ==============================================
-.langfuse/
+# ------------------------------------------------------------------------------
+# Section 6 — Données générées et volumineuses
+# ------------------------------------------------------------------------------
+# Base de données SQLite
+*.db
+*.sqlite
+*.sqlite3
 
-# ==============================================
-# Misc
-# ==============================================
-*.bak
+# Fichiers de données volumineux du projet (non versionnés)
+data/*.pkl
+data/*.npy
+data/*.npz
+data/*.parquet
+data/*.csv
+data/*.json
+data/*.jsonl
+data/*.txt
+data/*.faiss
+data/*.h5
+data/*.hdf5
+data/*.feather
+
+# GARDER ces fichiers de données essentiels (build scripts, marqueurs)
+# IMPORTANT : ces exceptions DOIVENT rester en dernier pour éviter les patterns conflictuels
+!data/.gitkeep
+!data/build_faiss_index.py
+
+# ------------------------------------------------------------------------------
+# Section 7 — Logs et fichiers temporaires
+# ------------------------------------------------------------------------------
+# Logs standards
+*.log
+logs/
+*.log.*
+
+# Logs Loguru (sérialisation JSON pour debugging avancé)
+*.log.json
+loguru_*.log
+**/logs/**/*.log
+**/logs/**/*.json
+
+# Fichiers temporaires du système et du projet
 *.tmp
+*.temp
+*.swp
+*.swo
+temp/
+tmp/
+cache/
+
+# ------------------------------------------------------------------------------
+# Section 8 — Couverture de code (Tests)
+# ------------------------------------------------------------------------------
+# Rapports de coverage (générés par pytest-cov)
+htmlcov/
+.tox/
+.nox/
+
+# ------------------------------------------------------------------------------
+# Section 9 — Jupyter Notebooks
+# ------------------------------------------------------------------------------
+# Cache et output des notebooks Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ------------------------------------------------------------------------------
+# Section 10 — Observabilité Langfuse
+# ------------------------------------------------------------------------------
+# Cache local de l'observabilité Langfuse (ne pas synchroniser)
+.langfuse/
+.langfuse_cache/
+
+# ------------------------------------------------------------------------------
+# Section 11 — Documentation (générée)
+# ------------------------------------------------------------------------------
+# Documentation auto-générée
+site/
+_build/
+docs/_build/
+
+# ------------------------------------------------------------------------------
+# Section 12 — Fichiers de verrouillage et métadonnées
+# ------------------------------------------------------------------------------
+# Fichiers de lock spécifiques au projet
+*.lock
+poetry.lock
+uv.lock
+
+
+# ------------------------------------------------------------------------------
+# Section 13 — Claude code
+# ------------------------------------------------------------------------------
+CLAUDE.md

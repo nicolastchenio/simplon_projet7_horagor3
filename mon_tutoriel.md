@@ -2864,3 +2864,537 @@ Le principe clé : on ne touche pas aux nœuds. Toute l'instrumentation se fait 
         curl -k -X POST https://localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <TOKEN>" -d "{\"message\":\"Parle-moi de The Exorcist\"}"
         ```
         Puis ouvre http://localhost:3000 → menu Tracing → tu dois voir une trace horragor-chat, dépliable nœud par nœud.
+
+## 8.2 Loguru ##
+Instrumenter de bout en bout la journalisation structurée sur les 3 couches du projet (Données, Intelligence, Présentation) afin d'assurer une traçabilité complète des requêtes, décisions, appels d'outils et erreurs en temps réel.
+
+Les 3 points clés de l'énoncé à couvrir:
+
+| Point | Où | Quoi |
+|---|---|---|
+| **Requêtes reçues** | `src/main.py` | Logger chaque requête HTTP entrante (user, query, timestamp) |
+| **Décision du routeur** | `src/graph/router.py` | Logger quel chemin est choisi (RAG seul, Scraper seul, RAG+Scraper, LLM pur) |
+| **Appels d'outils** | `src/graph/nodes.py` | Logger chaque nœud du graphe (RAG, Scraper, Narration) : entrée, sortie, erreur |
+
+Architecture de la Solution :
+
+| Principe | Implémentation |
+|---|---|
+| **Centralisation** | Un module `logging_config.py` par service (3 au total : src/, data_api/, app_frontend.py) configurant Loguru **une seule fois** au démarrage |
+| **Structuration** | Logs en JSON pour traçabilité (fichiers rotatifs dans `./logs/`) |
+| **Contexte** | Utilisation de `logger.contextualize(request_id=...)` pour **corréler les logs d'une même requête** à travers plusieurs fonctions/fichiers |
+| **Niveaux** | `DEBUG` (développement local), `INFO` (production) — paramétrable via `config.py` |
+| **Persistance** | Logs rotatifs (50 MB par fichier, max 5 fichiers) écrits dans `./logs/` |
+
+Structuration du code :
+```
+src/observability/
+├── __init__.py
+├── langfuse_client.py         ← tracing (agent Langfuse)
+└── logging_config.py          ← logging (infrastructure)  [NOUVEAU]
+
+data_api/observability/
+├── __init__.py
+└── logging_config.py          ← idem (copie conforme)  [NOUVEAU]
+
+app_frontend.py
+└── Au démarrage : from observability.logging_config import setup_logging; setup_logging()  [NOUVEAU]
+```
+
+Flux de Données d'une Requête (avec Loguru):
+```
+┌──────────────────────────────────┐
+│  COUCHE 3 : PRÉSENTATION         │
+│  (app_frontend.py / Streamlit)   │
+└────────────┬──────────────────────┘
+             │
+             ├─ logger.info("👤 User login")
+             │  (logs frontend)
+             │
+             ▼
+┌──────────────────────────────────────────────────┐
+│  COUCHE 2 : DONNÉES                              │
+│  (data_api/main.py :: /auth/login endpoint)      │
+│  ┌──────────────────────────────────────────────┐│
+│  │ logger.info("🔐 Tentative login")   [LOG A1] ││
+│  │ → data_api/database.py                       ││
+│  │   logger.info("🗄️ SELECT user WHERE...")  ││
+│  │ logger.info("✅ Login OK")           [LOG A2] ││
+│  └──────────────────────────────────────────────┘│
+└────────────┬──────────────────────────────────────┘
+             │
+             ├─ Token JWT retourné au Frontend
+             │
+             ▼
+┌─────────────────────────────────────────────────────────┐
+│  COUCHE 3 : PRÉSENTATION                                │
+│  (app_frontend.py :: POST /chat avec token)             │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │ logger.info("💬 User envoie question")    [LOG B1]  ││
+│  │ request_id = uuid.uuid4()                           ││
+│  │ with logger.contextualize(request_id=...) : ││
+│  └─────────────────────────────────────────────────────┘│
+└────────────┬─────────────────────────────────────────────┘
+             │
+             ▼ (HTTP POST /chat)
+┌─────────────────────────────────────────────────────────┐
+│  COUCHE 1 : INTELLIGENCE                                │
+│  (src/main.py :: /chat endpoint)                        │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │ logger.info("📨 Requête reçue")          [LOG #1]   ││
+│  │   request_id="abc-123"                              ││
+│  │   query="films horreur"                             ││
+│  │   user_id="alice"                                   ││
+│  │ ↳ request_id attaché à TOUS les logs qui suivent   ││
+│  └─────────────────────────────────────────────────────┘│
+└────────────┬─────────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────────┐
+│  src/graph/router.py :: route_request()                 │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │ logger.debug("🚦 Routeur décide: RAG+Web") [LOG #2] ││
+│  │ return "rag_scraper_branch"                         ││
+│  └─────────────────────────────────────────────────────┘│
+└────────────┬─────────────────────────────────────────────┘
+             │
+    ┌────────┴────────┐
+    ▼                 ▼
+┌──────────────────┐  ┌─────────────────────┐
+│ RAG Node         │  │ Scraper Node        │
+│ (src/graph/      │  │ (src/graph/         │
+│  nodes.py)       │  │  nodes.py)          │
+│ ┌────────────────┐│  │ ┌─────────────────┐ │
+│ │logger.info(    ││  │ │logger.info(     │ │
+│ │"🔍 RAG search" ││  │ │"🌐 Scraper Web" │ │
+│ │)      [LOG #3] ││  │ │)      [LOG #3b] │ │
+│ └────────────────┘│  │ └─────────────────┘ │
+│                  │  │                     │
+│ → src/tools/     │  │ → src/tools/        │
+│   rag_tool.py    │  │   scraper_tool.py   │
+│                  │  │                     │
+│ logger.info(     │  │ logger.info(        │
+│ "📊 FAISS: "     │  │ "📡 Wikipedia API:  │
+│ )                │  │ ")                  │
+│                  │  │                     │
+│ logger.info(     │  │ logger.info(        │
+│ "✅ 5 docs",     │  │ "✅ 2 pages",       │
+│  scores=...      │  │  urls=...           │
+│ )                │  │ )                   │
+└────────┬─────────┘  └────────┬────────────┘
+         │                     │
+         └──────────┬──────────┘
+                    ▼
+        ┌─────────────────────────────┐
+        │ Narration Node              │
+        │ (src/graph/nodes.py)        │
+        │ ┌───────────────────────────┐│
+        │ │logger.info(               ││
+        │ │"✍️ LLM Narration") [LOG #4]││
+        │ │                           ││
+        │ │ → src/observability/      ││
+        │ │   langfuse_client.py      ││
+        │ │   (trace agent)           ││
+        │ │                           ││
+        │ │logger.info(               ││
+        │ │"✅ Narration OK",         ││
+        │ │char_count=...,            ││
+        │ │tokens_used=...            ││
+        │ │)                          ││
+        │ └───────────────────────────┘│
+        └────────────┬─────────────────┘
+                     │
+                     ▼
+┌──────────────────────────────────────────────────────────┐
+│  src/main.py :: retour réponse                           │
+│  ┌──────────────────────────────────────────────────────┐│
+│  │ logger.info("✅ Réponse envoyée",  [LOG #5]          ││
+│  │             elapsed_ms=1636)                         ││
+│  │ return ChatResponse(...)                             ││
+│  └──────────────────────────────────────────────────────┘│
+└────────────┬──────────────────────────────────────────────┘
+             │
+             ▼ (HTTP response 200)
+┌──────────────────────────────────────────────────────────┐
+│  COUCHE 3 : PRÉSENTATION                                 │
+│  (app_frontend.py :: affiche réponse)                    │
+│  ┌──────────────────────────────────────────────────────┐│
+│  │ logger.info("✅ Réponse affichée", [LOG B2]          ││
+│  │             elapsed_frontend_ms=42)                  ││
+│  └──────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────┘
+
+   ═══════════════════════════════════════════════════════════════════════════
+   ./logs/intelligence_api.log.json
+   ═══════════════════════════════════════════════════════════════════════════
+   {"time":"2026-07-31T18:20:12.345Z","level":"INFO",
+    "service":"intelligence","message":"📨 Requête reçue",
+    "request_id":"abc-123","query":"films horreur","user_id":"alice"}
+
+   {"time":"2026-07-31T18:20:12.356Z","level":"DEBUG",
+    "service":"intelligence","message":"🚦 Routeur: RAG+Web",
+    "request_id":"abc-123"}
+
+   {"time":"2026-07-31T18:20:12.401Z","level":"INFO",
+    "service":"intelligence","message":"🔍 RAG search",
+    "request_id":"abc-123","query":"films horreur","top_k":5}
+
+   {"time":"2026-07-31T18:20:12.523Z","level":"INFO",
+    "service":"intelligence","message":"✅ RAG: 5 docs",
+    "request_id":"abc-123","scores":[0.89,0.87,0.82,0.78,0.75]}
+
+   {"time":"2026-07-31T18:20:12.525Z","level":"INFO",
+    "service":"intelligence","message":"🌐 Scraper Web",
+    "request_id":"abc-123"}
+
+   {"time":"2026-07-31T18:20:13.001Z","level":"INFO",
+    "service":"intelligence","message":"✅ Scraper: 2 pages",
+    "request_id":"abc-123","titles":["The Shining","Hereditary"]}
+
+   {"time":"2026-07-31T18:20:13.105Z","level":"INFO",
+    "service":"intelligence","message":"✍️ LLM Narration",
+    "request_id":"abc-123"}
+
+   {"time":"2026-07-31T18:20:13.980Z","level":"INFO",
+    "service":"intelligence","message":"✅ Narration OK",
+    "request_id":"abc-123","char_count":1240,"tokens_used":234}
+
+   {"time":"2026-07-31T18:20:13.981Z","level":"INFO",
+    "service":"intelligence","message":"✅ Réponse envoyée",
+    "request_id":"abc-123","elapsed_ms":1636}
+   ═══════════════════════════════════════════════════════════════════════════
+
+   ═══════════════════════════════════════════════════════════════════════════
+   ./logs/data_api.log.json
+   ═══════════════════════════════════════════════════════════════════════════
+   {"time":"2026-07-31T18:20:12.320Z","level":"INFO",
+    "service":"data","message":"🔐 Tentative login",
+    "user_id":"alice","endpoint":"/auth/login"}
+
+   {"time":"2026-07-31T18:20:12.325Z","level":"DEBUG",
+    "service":"data","message":"🗄️ SELECT user",
+    "query":"WHERE username='alice'","elapsed_ms":5}
+
+   {"time":"2026-07-31T18:20:12.330Z","level":"INFO",
+    "service":"data","message":"✅ Login OK",
+    "user_id":"alice","token_expires_in_s":3600}
+   ═══════════════════════════════════════════════════════════════════════════
+
+   ═══════════════════════════════════════════════════════════════════════════
+   ./logs/frontend.log.json
+   ═══════════════════════════════════════════════════════════════════════════
+   {"time":"2026-07-31T18:20:12.300Z","level":"INFO",
+    "service":"frontend","message":"👤 User login",
+    "user_id":"alice","endpoint":"http://localhost:8001/auth/login"}
+
+   {"time":"2026-07-31T18:20:12.340Z","level":"INFO",
+    "service":"frontend","message":"💬 User envoie question",
+    "request_id":"abc-123","query":"films horreur"}
+
+   {"time":"2026-07-31T18:20:13.985Z","level":"INFO",
+    "service":"frontend","message":"✅ Réponse affichée",
+    "request_id":"abc-123","elapsed_frontend_ms":42}
+   ═══════════════════════════════════════════════════════════════════════════
+   ↳ 3 fichiers logs, parsables par Prometheus/Grafana/Uptime Kuma
+```
+Plan Détaillé COMPLET — Les 3 Couches
+1) Couche 1 : Intelligence (src/)
+   - Priorité 1 — Fondations
+  
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 1 | `src/config.py` | **[MODIFIER]** Ajouter `LOG_LEVEL`, `LOG_DIR`, `LOG_JSON`, `LOG_FILE_MAX_BYTES`, `LOG_FILE_BACKUP_COUNT` | Source unique de configuration Loguru |
+        | 2 | `pyproject.toml` | **[VÉRIFIER/AJOUTER]** Dépendance `loguru>=0.7.0` | Loguru doit être installé |
+        | 3 | `src/observability/logging_config.py` | **[CRÉER]** Module d'initialisation (fonction `setup_logging()`) | Exécuté une seule fois au démarrage |
+        | 4 | `src/main.py` | **[MODIFIER]** Appel `setup_logging()` en premier, logs requêtes reçues/réponses | Point d'entrée : chaque requête HTTP loggée |
+        | 5 | `src/graph/router.py` | **[MODIFIER]** Logs de la décision du routeur | **Point clé énoncé** : tracer quel chemin est choisi |
+        | 6 | `src/graph/nodes.py` | **[MODIFIER]** Logs in/out des 3 nœuds (RAG, Scraper, Narration) | **Point clé énoncé** : appels d'outils loggés |
+
+   - Priorité 2 — Cohérence de la chaîne
+
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 7 | `src/tools/rag_tool.py` | **[MODIFIER]** Logs internes : nb docs, scores, fallback | Visibilité sur le comportement du RAG |
+        | 8 | `src/tools/scraper_tool.py` | **[MODIFIER]** Logs internes : URL appelée, succès/échec réseau | Visibilité sur le Scraper |
+        | 9 | `src/api/auth.py` | **[MODIFIER]** Logs des tentatives login (réussi et échoué) | Sécurité : tracer les authentifications |
+
+   - Priorité 3 — Infrastructure (src)
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 10 | `src/graph/pipeline.py` | **[MODIFIER]** Logs de compilation du graphe | Diagnostic au boot |
+        | 11 | `src/observability/langfuse_client.py` | **[MODIFIER]** Remplacer `print()` par `logger` | Cohérence observabilité |
+
+2) Couche 2 : Données (data_api/)
+   - Priorité 1 — Fondations
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 12 | `data_api/config.py` | **[CRÉER OU VÉRIFIER]** Ajouter `LOG_LEVEL`, `LOG_DIR`, `LOG_JSON`, etc. | Même configuration que src/ |
+        | 13 | `data_api/observability/logging_config.py` | **[CRÉER]** Copie conforme de `src/observability/logging_config.py` | Exécuté au démarrage de `data_api/main.py` |
+        | 14 | `data_api/main.py` | **[MODIFIER]** Appel `setup_logging()` en premier | Point d'entrée data_api : requêtes HTTP loggées |
+
+   - Priorité 2 — Chaîne
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 15 | `data_api/database.py` | **[MODIFIER]** Logs des opérations DB (SELECT, INSERT, UPDATE, DELETE) | Traçabilité complète des données |
+        | 16 | `data_api/api/auth.py` (si existe) | **[MODIFIER]** Logs des authentifications data_api | Cohérence sécurité |
+
+3) Couche 3 : Présentation (app_frontend.py)
+   - Priorité 1 — Fondations
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 17 | `observability/logging_config.py` (frontend) | **[CRÉER]** Copie conforme de `src/observability/logging_config.py` | Streamlit loggé structurément |
+        | 18 | `app_frontend.py` | **[MODIFIER]** Appel `setup_logging()` au démarrage, logs des interactions utilisateur | Point d'entrée Streamlit : événements loggés |
+
+   - Priorité 2 — Chaîne
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 19 | `app_frontend.py` (auth section) | **[MODIFIER]** Logs des appels `/auth/login` et `/auth/refresh` | Tracer les sessions utilisateur |
+        | 20 | `app_frontend.py` (chat section) | **[MODIFIER]** Logs des appels `/chat` et temps de réponse | Tracer les interactions |
+
+4) Infrastructure & Docker (Tous les services)
+
+    | # | Fichier | Action | Raison |
+    |---|---|---|---|
+    | 21 | `docker-compose.dev.yml` | **[MODIFIER]** Ajouter volumes `./logs:/app/logs` pour **chaque service** | Persistance logs Intelligence + Données + Frontend |
+    | 22 | `.gitignore` | **[MODIFIER]** Ajouter `logs/` | Ne pas commiter les fichiers log |
+
+
+Ordre de transmission suggéré:  
+
+1) Fondations (Intelligence) : pyproject.toml + src/config.py
+→ creation de src/observability/logging_config.py
+2) Point d'entrée (Intelligence): src/main.py
+3) Cœur de l'énoncé (Intelligence): src/graph/router.py + src/graph/nodes.py
+4) Chaîne Intelligence : src/tools/rag_tool.py + src/tools/scraper_tool.py + src/api/auth.py + src/graph/pipeline.py + src/observability/langfuse_client.py
+5) Fondations (Données) : data_api/config.py + data_api/main.py
+→ creation de data_api/observability/logging_config.py
+6) Chaîne (Données) : data_api/database.py
+7) Fondations (Frontend) : app_frontend.py (sections auth + chat)
+→ creation de  observability/logging_config.py (frontend)
+8) Infrastructure : docker-compose.dev.yml + .gitignore
+
+Résumé : Les 3 Couches Couvertes
+| Couche | Point d'Entrée | Router/Décision | Appels d'Outils | Persistence |
+|---|---|---|---|---|
+| **Intelligence** (`src/`) | `src/main.py` ✅ | `src/graph/router.py` ✅ | `src/graph/nodes.py` + outils ✅ | `./logs/intelligence_api.log.json` ✅ |
+| **Données** (`data_api/`) | `data_api/main.py` ✅ | N/A (pas de routeur) | `data_api/database.py` ✅ | `./logs/data_api.log.json` ✅ |
+| **Présentation** (`app_frontend.py`) | `app_frontend.py` ✅ | N/A (pas de routeur) | Appels `/chat` + `/auth` ✅ | `./logs/frontend.log.json` ✅ |
+
+----------------
+
+1) actions point 1:
+    - MODIFICATION 1 : src/config.py
+    - CRÉATION : 
+       - src/observability/logging_config.py
+       - src/observability/json_serializer.py => pour ameliiorer la presentation du json
+    - Variables d'environnement à ajouter au .env (optionnel, defaults OK) (idem pour le .env.example et .env.docker)
+
+
+2) actions point 2 :  
+    On va maintenant modifier src/main.py pour intégrer le logging structuré au point d'entrée de l'application Intelligence.
+    - Importer setup_logging() de src/observability/logging_config.py
+    - Appeler setup_logging() en tout premier (avant FastAPI)
+    - Remplacer les print() par des logs structurés
+    - Ajouter un middleware de requête/réponse avec request_id automatique
+    - Logger les requêtes HTTP, réponses et erreurs
+
+    On obtient maintenant :
+    - Traçabilité complète : chaque requête HTTP a un request_id unique
+    - Logs structurés : points clés avec tags [lifespan], [chat_endpoint], etc.
+    - Gestion des erreurs : 401, 503, 500 sont loggées correctement
+    - Temps de réponse : chaque requête note son elapsed_time
+    - X-Request-ID dans les headers : utile pour tracker côté frontend
+
+    Tests :
+    - rebuild : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - Test A — le démarrage : ` docker logs horragor-ia --tail 40 `
+    - Test B — le middleware et le X-Request-ID : `curl -ki https://localhost:8000/health `  
+        ✅ Attendu : HTTP/1.1 200 OK + un header x-request-id: <uuid>.  
+        Note l'UUID, puis : ` docker logs horragor-ia --tail 20 `  
+        ✅ Attendu : → Requête entrante : GET /health, la ligne debug du health check, et ← Réponse : 200 (x.xx ms) — les trois portant le même request_id. C'est ça qui prouve que la traçabilité fonctionne.
+    - Test C — non-régression /chat authentifié  
+        Récupère un token (adapte le mot de passe) : `  curl -k -s -X POST https://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"TON_MDP\"}"`
+        Puis, avec le token : `curl -ki -X POST https://localhost:8000/chat -H "Authorization: Bearer TON_TOKEN" -H "Content-Type: application/json" -d "{\"message\":\"Parle-moi de The Exorcist\"}" `  
+        ✅ Attendu : 200 + JSON complet (response, sources, used_web, thread_id).  Dans les logs, la chaîne complète avec le même request_id : requête entrante → ✅ Utilisateur authentifié : admin → Sources FAISS extraites : N → ← Réponse : 200.
+
+3) actions point 3 : modifications =>  
+    nodes.py :  
+        - Import from loguru import logger  
+        - Logs structurés dans rag_node :  
+          - logger.info() pour les étapes principales (début, vectoriel, structuré, résumé)  
+          - logger.debug() pour les détails (normalisation, fallback, métadonnées)  
+        - Logs dans scraper_node (priorités, appels web)
+        - Logs dans narration_node (corpus, outils, LLM invocation, succès/erreur)  
+        - Docstrings enrichies, commentaires français préservés
+
+    router.py
+      - Import from loguru import logger
+      - Logs dans helpers (_extract_best_faiss_score, _structured_has_matches, _faiss_is_relevant)
+      - Logs détaillés dans route_after_rag() :
+       - logger.warning() pour décisions négatives (aucun signal)
+       - logger.info() pour décisions positives (avec contexte détaillé)
+      - Docstrings enrichies en français
+      - Suppression du logger = logging.getLogger(__name__) (remplacé par Loguru)
+  
+    Tests :  
+       - verifier que dans ".env.docker" => ` LOG_LEVEL=DEBUG `
+       - rebuild : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `  
+       - Test :   
+         - ` docker logs -f horragor-ia ` ou ` docker logs -f horragor-ia | findstr /C:"RAG Node" /C:"Router" /C:"Scraper" /C:"Narration" `  
+         - et faire une requete dans interface streamlit
+
+4) actions point 4 : Chaîne Intelligence : 
+- src/tools/rag_tool.py — Logs du comportement vectoriel et structuré
+  
+    | Point | Statut actuel | À ajouter |
+    |-------|--------------|-----------|
+    | Chargement FAISS | ✅ Logs présents | ✅ Logs OK |
+    | Recherche vectorielle | ⚠️ Logs minimalistes | 🔴 **Ajouter : scores des résultats, seuil de pertinence** |
+    | Appels data-api | ⚠️ Pas de logs | 🔴 **Ajouter : URL, statut HTTP, nombre de résultats** |
+    | Erreurs réseau | ⚠️ Minimaliste | 🔴 **Ajouter : timeout, détail d'erreur** |
+    | Fuzzy matching | ⚠️ Minimaliste | 🔴 **Ajouter : score_cutoff, candidats testés** |
+
+    tests :
+    - ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - Syntaxe Python valide => ` python -m py_compile src/tools/rag_tool.py && echo "✅ Syntaxe OK" `
+    - Vérifier les imports => ` python -c "from src.tools.rag_tool import search_local_horror_lore, query_movie_metadata, find_similar_horror_movies, fuzzy_find_film, resolve_film, _load_faiss_resources; print('OK: 6 fonctions importees')" `
+    - Compter les appels logger => ` findstr /C:"logger." src\tools\rag_tool.py | find /c /v "" ` ou ` for %L in (info debug warning error success) do @findstr /C:"logger.%L" src\tools\rag_tool.py | find /c /v "" > nul & findstr /C:"logger.%L" src\tools\rag_tool.py | find /c /v "" `
+    - Sections docstring (Parameters / Returns / Raises) => ` findstr /R /C:"Parameters" /C:"Returns" /C:"Raises" src\tools\rag_tool.py | find /c /v ""`
+    - Signatures inchangées => ` python -c "import inspect,src.tools.rag_tool as m;[print(n, inspect.signature(f)) for n,f in vars(m).items() if callable(f) and getattr(f,'__module__','')==m.__name__]" `
+    - Vérification en conditions réelles (Docker) :
+        ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `  
+        Puis, dans un second terminal cmd : ` docker logs -f horragor-ia | findstr /C:"FAISS" /C:"data-api" /C:"Fuzzy" /C:"pgvector" /C:"score" `  
+        Lance ensuite une requête Streamlit avec un titre volontairement mal orthographié (ex. « Shinning » ou « Concjuring ») pour faire apparaître (score_cutoff appliqué + candidat fuzzy retenu, les scores FAISS (min / max / moyen), l'URL data-api appelée + statut HTTP + durée ms)
+    - Aucune exception avalée => ` findstr /C:"except" src\tools\rag_tool.py `
+
+- src/tools/scraper_tool.py — Logs des appels réseau et parsing  
+    les modifications :  
+    | Exigence | Implémentation |
+    |---|---|
+    | URL cible appelée | `urlencode` complet en `debug` avant chaque GET |
+    | Statut HTTP + durée ms | `info` après chaque réponse, avec `perf_counter` |
+    | Taille réponse | octets bruts + nb caractères du fragment HTML |
+    | Éléments extraits | nb sections, nb `<sup>` retirés, nb `<p>`, nb paragraphes conservés, taux de compression |
+    | Page vide / sélecteur KO | `warning` dédié si 0 section, 0 `<p>`, fragment vide, texte vide après nettoyage |
+    | Timeout / RequestError / HTTPError | 3 `except` distincts + `ValueError` JSON, tous en `error` avec durée |
+    | User-agent / config | logué une fois au chargement du module |
+    | Bonus | redirection Wikipédia détectée et tracée, liste des sections disponibles en cas d'échec étape 2 |
+
+    tests :
+    - ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - Syntaxe => ` python -m py_compile src\tools\scraper_tool.py && echo OK Syntaxe `
+    - Imp => orts (5 fonctions) => ` python -c "from src.tools.scraper_tool import _fetch_page_sections, _fetch_section_html, _clean_wiki_html, extract_wikipedia_synopsis, enrich_from_web; print('OK: 5 fonctions importees')" `
+    - Comptage logger (≥ 45 attendu) => ` findstr /C:"logger." src\tools\scraper_tool.py | find /c /v "" `
+    - Instrumentation durée (~20 attendu) => ` findstr /N /C:"perf_counter" src\tools\scraper_tool.py | find /c /v "" `
+    - Gestion d'erreurs (8 attendu : 2×Timeout, 2×HTTPError, 2×RequestException, 2×ValueError) => ` findstr /C:"except requests" /C:"except ValueError" src\tools\scraper_tool.py `
+    - Signatures inchangées => ` python -c "import inspect,src.tools.scraper_tool as m;[print(n, inspect.signature(f)) for n,f in vars(m).items() if callable(f) and getattr(f,'__module__','')==m.__name__]" `
+    - Cas réel : film existant => ` python -c "from src.tools.scraper_tool import enrich_from_web; r=enrich_from_web('Shining'); print('LONGUEUR:', len(r))" `
+    - Cas d'échec : page inexistante => ` python -c "from src.tools.scraper_tool import enrich_from_web; r=enrich_from_web('FilmQuiNexistePasXyz123'); print('VIDE' if not r else 'PROBLEME')" `
+    - Cas limite : article sans section synopsis => ` python -c "from src.tools.scraper_tool import enrich_from_web; enrich_from_web('Python (langage)')" `
+    - Titre vide => ` python -c "from src.tools.scraper_tool import enrich_from_web; print(repr(enrich_from_web('')))" `
+
+- src/api/auth.py — Logs des tentatives d'authentification  
+  Ne jamais logger le mot de passe en clair, seulement le username et le résultat (succès/échec).  
+  Ce qui a changé (aucune signature, aucun comportement HTTP touché) :
+    - import time + from loguru import logger ajoutés
+    - logger.info en entrée de login() et refresh() — jamais le password, jamais le refresh_token complet (seulement 10 premiers caractères en debug)
+    - logger.warning sur chaque branche d'échec utilisateur (username inconnu, mauvais password, refresh invalide), avec la raison précise
+    - logger.error distinct pour l'erreur serveur (hash non configuré) — c'est un problème d'infra, pas une tentative malveillante
+    - logger.success + durée en ms sur les deux succès, sans jamais afficher les tokens générés
+
+    tests : 
+    - ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - ` python -m py_compile src/api/auth.py && echo OK Syntaxe `
+    - test réelles via l'API démarrée (uvicorn ou ton main.py) :
+        ```
+        # Terminal 1 : démarre le serveur
+        uvicorn src.main:app --reload
+
+        # Terminal 2 : tests
+        # Test 1 : mauvais username
+        curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"mauvais_user\",\"password\":\"x\"}"
+
+        # Test 2 : mauvais password (remplace "admin" et "motdepasse123" par tes vraies credentials)
+        curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"mauvais_password\"}"
+
+        # Test 3 : bon login (remplace par tes vraies credentials)
+        curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"motdepasse123\"}"
+
+        # Test 4 : refresh token invalide
+        curl -4 -X POST http://localhost:8000/auth/refresh -H "Content-Type: application/json" -d "{\"refresh_token\":\"token_invalide\"}"
+
+        ```
+
+- src/graph/pipeline.py — Logs de compilation du graphe LangGraph
+    tests : 
+    - verification syntaxique => ` python -c "import ast; ast.parse(open('src/graph/pipeline.py', encoding='utf-8').read()); print('Syntaxe OK')" `
+    - rebuid du conteneur : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - les logs de compilation => ` docker logs horragor-ia --tail 40 ` ou ` docker logs horragor-ia 2>&1 | findstr /C:"[Graph]" `
+    - Vérifier que rien n'est cassé :   
+        - dans un Terminal 1 : démarrer le serveur => ` uvicorn src.main:app --reload `
+        - dans un autre terminal :  
+        Le graphe compilé doit toujours fonctionner. Récupère un token puis interroge /chat => ` curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"motdepasse123\"}" `
+        Copie l'access_token, puis => ` curl -4 -X POST http://localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer TON_TOKEN" -d "{\"message\":\"Quels sont les horaires d ouverture ?\"}" `
+
+
+- src/observability/langfuse_client.py — Remplacer print() par logger  
+    langfuse_client.py utilise directement Loguru au lieu du logging standard (pour homogénéiser tout le code avec from loguru import logger partout plutôt que de compter sur une interception implicite).  
+
+5) actions point 5 : Fondations (Données) :
+- data_api/config.py (nouveau)
+Même pattern que src/config.py : chargement du .env racine, PROJECT_ROOT, puis les 5 variables déjà présentes dans .env.example : LOG_LEVEL, LOG_DIR, LOG_JSON, LOG_FILE_MAX_BYTES, LOG_FILE_BACKUP_COUNT, avec création de LOG_DIR. Rien d'autre (pas de duplication de DATABASE_URL etc., hors scope).
+
+- data_api/observability/ (nouveau : __init__.py, logging_config.py)
+Copie auto-suffisante (pas d'import vers src.observability), à cause de la contrainte Docker ci-dessus. Adaptations par rapport à la version src/ :
+  - flatten_loguru_record → "service": "data-api" au lieu de "intelligence".
+  - LOG_FILE_PATH = LOG_DIR / "data_api.log" (fichier distinct, même dossier logs/ partagé).
+  - Liste des loggers stdlib interceptés réduite à uvicorn*, fastapi, starlette (pas httpx/langfuse, absents côté data_api).
+  - Import des constantes depuis data_api.config au lieu de src.config.
+
+    Dans src/observability/logging_config.py, la classe JsonFileSink (utilisée quand LOG_JSON=True, qui est la valeur par défaut dans .env.example) appelle flatten_loguru_record() pour transformer chaque enregistrement Loguru en une ligne JSON à plat. Cette fonction vit dans json_serializer.py — ce n'est pas optionnel, sans elle le sink JSON ne peut pas fonctionner.
+
+    Comme data_api/observability/logging_config.py doit être autonome (pas d'import vers src/), il a besoin de cette même fonction, mais avec "service": "data-api" au lieu de "intelligence".
+
+    j ai choisi d'une  Fonction inlinée directement dans data_api/observability/logging_config.py (pas de fichier séparé) plutot que de creer un autre Fichier séparé data_api/observability/json_serializer.py — symétrique avec src/.
+
+- data_api/main.py (modifié)
+Appel de setup_logging() tout en haut du fichier, avant l'import de data_api.routers.films (qui déclenche l'import de database.py/psycopg2), exactement comme dans src/main.py.
+
+6) actions point 6 : Chaîne (Données)
+
+    Pour l'item 15 (data_api/database.py) — le point délicat : les requêtes SQL (SELECT, futures INSERT/UPDATE/DELETE) sont exécutées dans data_api/routers/films.py via conn.cursor().execute(...), pas dans database.py lui-même, qui ne fait qu'ouvrir/fermer la connexion. Pour respecter la consigne "modifier database.py uniquement" sans toucher films.py, j'ai :
+
+    - Logger le cycle de vie de la connexion dans get_db_connection() : ouverture réussie (debug) et fermeture (debug), en plus du logger.error déjà présent sur OperationalError.
+    - Instrumenter execute() de façon transparente : get_db_connection() retournera une connexion enveloppée dont .cursor(...) produit un curseur enveloppé qui journalise automatiquement, à chaque appel execute() :
+        - l'opération détectée (SELECT/INSERT/UPDATE/DELETE, extrait du premier mot de la requête),
+        - la durée en ms,
+        - le nombre de lignes affectées (rowcount),
+        - les erreurs SQL (logger.error avant de relever l'exception).
+
+        Ce wrapper délègue tout le reste (fetchall, fetchone, cursor_factory=RealDictCursor, etc.) au curseur psycopg2 réel via __getattr__ — donc aucune modification de films.py n'est nécessaire, toutes les requêtes existantes et futures sont tracées automatiquement.
+
+
+7) actions point 7 : Fondations (Frontend) 
+
+- observability/logging_config.py (nouveau, package racine)
+  - Auto-suffisant comme la version data_api, mais importe LOG_LEVEL/LOG_DIR/etc. directement depuis src.config (pas de nouveau config.py frontend créé — il n'apparaît pas dans ta table, et docker/frontend.Dockerfile copie déjà tout src/, contrairement à data_api qui n'en copie qu'un extrait). C'est cohérent avec app_frontend.py qui importe déjà API_BASE_URL/API_TIMEOUT depuis src.config.
+  - service="frontend", fichier logs/frontend.log.
+  - Interception stdlib limitée à streamlit et httpx (pas de fastapi/uvicorn, absents ici).
+
+- app_frontend.py (modifié)
+  - Point d'attention important, propre à Streamlit : le script entier se ré-exécute à chaque interaction (clic, saisie...). Appeler setup_logging() sans garde à chaque rerun re-déclencherait toute l'init Loguru en boucle. Je protège l'appel avec st.cache_resource (le mécanisme Streamlit idiomatique garantissant une exécution unique par process), plutôt qu'un simple flag global fragile.
+  - Remplace le seul print() du fichier (decode_jwt_payload, ligne 74) par logger.error(...), dans la continuité du remplacement print() → logger déjà fait sur langfuse_client.py (item 11).
+  - section auth (login(), refresh_access_token())
+    - login() : logger.info avec username bindé si succès, logger.warning si échec (mauvais identifiants) ou logger.error si erreur inattendue (réseau, TLS...).
+    - refresh_access_token() : logger.info si le refresh réussit, logger.warning s'il échoue.
+  - section chat (call_chat_api())
+    - Mesure du temps de réponse avec time.perf_counter() (nouvel import time).
+    - logger.debug avant l'envoi (longueur de la question, thread_id bindé).
+    - logger.info avec duration_ms à la réception d'une réponse 200 (avant ou après un refresh automatique sur 401).
+    - logger.warning/logger.error sur les cas d'échec : token expiré sans refresh possible, erreur HTTP non-200, ConnectError (backend hors ligne), exception inattendue.
+
+    Toutes ces lignes utilisent logger.bind(thread_id=..., username=...) pour rester corrélables entre elles dans les logs JSON. Je garde les st.error/st.info existants intacts (affichage utilisateur), j'ajoute juste les logs en parallèle.
+
+8) actions point 8 :Infrastructure 
+
+j'ajoute volumes: - ./logs:/app/logs aux 3 services (data-api, intelligence-api, frontend) dans docker-compose.dev.yml — confirmé que les 3 services utilisent déjà LOG_DIR=/app/logs via .env.docker, donc le montage rendra directement visibles data_api.log, intelligence_api.log et frontend.log sur ton PC dans ./logs/.

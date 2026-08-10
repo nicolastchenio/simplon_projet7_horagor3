@@ -1,4 +1,5 @@
-```
+# Structure du projet
+
 horragor-project/
 ├── data/
 │   └── faiss_index/          # Index vectoriel généré en Phase 1
@@ -7,9 +8,13 @@ horragor-project/
 │   └── build_faiss_index.py 
 ├── data_api/      ← (NOUVEAU)
 │   ├── __init__.py
+│   ├── config.py             # Config logs (Phase 8.2)  [NOUVEAU]
 │   ├── database.py
 │   ├── models.py
 │   ├── main.py
+│   ├── observability/         # [NOUVEAU]
+│   │   ├── __init__.py
+│   │   └── logging_config.py
 │   └── routers/
 │       ├── __init__.py
 │       └── films.py
@@ -22,6 +27,9 @@ horragor-project/
 │   └── generate_cert.py
 ├── .streamlit/
 │   └── config.toml           # Thème "Horror" (Phase 0.4)
+├── observability/              # Logging Streamlit (Phase 8.2)  [NOUVEAU]
+│   ├── __init__.py
+│   └── logging_config.py
 ├── src/
 │   ├── __init__.py
 │   ├── main.py               # Serveur FastAPI (API Intelligence)
@@ -31,6 +39,8 @@ horragor-project/
 │   │   └── auth.py  
 │   │──observability/
 │   │   ├── __init__.py
+│   │   ├── logging_config.py
+│   │   ├── json_serializer.py
 │   │   └── langfuse_client.py  
 │   │──auth/
 │   │   ├── __init__.py
@@ -50,6 +60,7 @@ horragor-project/
 │       └── pipeline.py       # Câblage et compilation du graphe
 ├── docs/                     # Sphinx (Phase 9)
 ├── tests/                    # Tests unitaires & intégration
+├── logs/                      # Logs Loguru des 3 services, montés en volume (Phase 8.2)  [NOUVEAU]
 ├── pyproject.toml
 ├── app_frontend.py           # UI Streamlit (Phase 5)
 ├── .gitignore
@@ -58,7 +69,7 @@ horragor-project/
 ├── .env
 ├── .env.docker
 └── .env.example
-```
+
 
 # demarrer le projet #
 

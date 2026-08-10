@@ -16,7 +16,8 @@ WORKDIR /app
 # httpx     : client HTTP utilisé par app_frontend.py
 # streamlit : framework UI
 # python-dotenv : utilisé par src/config.py (from dotenv import load_dotenv)
-RUN pip install --no-cache-dir streamlit httpx python-dotenv
+# loguru : journalisation structurée (Phase 8.2, observability/logging_config.py)
+RUN pip install --no-cache-dir streamlit httpx python-dotenv loguru
 
 # ── Config Streamlit (thème Horror) ──
 COPY .streamlit/ .streamlit/
@@ -24,6 +25,7 @@ COPY .streamlit/ .streamlit/
 # ── Application ──
 COPY app_frontend.py .
 COPY src/ src/
+COPY observability/ observability/
 
 # Port par défaut de Streamlit
 EXPOSE 8501

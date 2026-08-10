@@ -34,12 +34,11 @@ Architecture
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-from src import config
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from src import config
 
 # ═══════════════════════════════════════════════════════════════
 # Singleton module-level
@@ -55,7 +54,6 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 _NOT_INITIALIZED = object()
 _handler: Any = _NOT_INITIALIZED
-
 
 def _build_handler() -> Any | None:
     """Instancie le ``CallbackHandler`` Langfuse (usage interne).
@@ -85,9 +83,8 @@ def _build_handler() -> Any | None:
         from langfuse.langchain import CallbackHandler
     except ImportError as exc:
         logger.warning(
-            "Paquet 'langfuse' introuvable (%s). "
-            "Observabilité désactivée. Installez-le avec : uv pip install langfuse",
-            exc,
+            f"Paquet 'langfuse' introuvable ({exc}). "
+            "Observabilité désactivée. Installez-le avec : uv pip install langfuse"
         )
         return None
 
@@ -97,16 +94,14 @@ def _build_handler() -> Any | None:
     # / LANGFUSE_HOST, que src.config a déjà chargées via python-dotenv.
     try:
         handler = CallbackHandler()
-        logger.info("✅ Langfuse actif — traces envoyées vers %s", config.LANGFUSE_HOST)
+        logger.info(f"✅ Langfuse actif — traces envoyées vers {config.LANGFUSE_HOST}")
         return handler
     except Exception as exc:  # noqa: BLE001 — on veut TOUT capturer ici
         logger.warning(
-            "Échec d'initialisation du CallbackHandler Langfuse : %s. "
-            "L'agent continue sans observabilité.",
-            exc,
+            f"Échec d'initialisation du CallbackHandler Langfuse : {exc}. "
+            "L'agent continue sans observabilité."
         )
         return None
-
 
 def get_langfuse_handler() -> Any | None:
     """Retourne le ``CallbackHandler`` Langfuse partagé (ou ``None``).
@@ -135,7 +130,6 @@ def get_langfuse_handler() -> Any | None:
 
     return _handler
 
-
 def flush_langfuse() -> None:
     """Force l'envoi immédiat des traces en attente vers le serveur.
 
@@ -162,4 +156,4 @@ def flush_langfuse() -> None:
         get_client().flush()
         logger.info("Traces Langfuse vidées (flush) avant extinction.")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Échec du flush Langfuse : %s", exc)
+        logger.warning(f"Échec du flush Langfuse : {exc}")
