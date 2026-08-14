@@ -13,11 +13,16 @@ métadonnées utilisées par l'agent conversationnel. Il s'appuie sur :
 
 Les ressources FAISS sont chargées une seule fois en mémoire via un
 mécanisme de singleton (module-level) afin d'éviter les I/O répétées.
+
+Notes
+-----
+La traçabilité des opérations est assurée via Loguru.
 """
 
 from __future__ import annotations
 
 import pickle
+import time
 from typing import Any
 
 import faiss
@@ -137,16 +142,29 @@ def search_local_horror_lore(
         Résultats ordonnés par pertinence décroissante. Chaque élément
         contient ``chunk``, ``metadata`` et ``score``.
     """
+    logger.info(f"Entrée recherche FAISS : requête='{query[:80]}', top_k={top_k}")
     index, metas, embedder = _load_faiss_resources()
 
     formatted_query = f"search_query: {query.strip()}"
     logger.debug(f"Requête formatée : {formatted_query[:80]}...")
 
-    query_vector = embedder.embed_query(formatted_query)
+    debut_embedding = time.perf_counter()
+    try:
+        query_vector = embedder.embed_query(formatted_query)
+    except Exception as exc:
+        logger.error(f"Échec de génération de l'embedding : {exc}")
+        raise
+    duree_embedding_ms = (time.perf_counter() - debut_embedding) * 1000
+    logger.debug(
+        f"Embedding généré : dimension={len(query_vector)}, durée={duree_embedding_ms:.2f} ms"
+    )
     query_np = np.array([query_vector], dtype=np.float32)
     faiss.normalize_L2(query_np)
 
     distances, indices = index.search(query_np, top_k)
+    logger.debug(
+        f"Scores bruts FAISS : {[round(float(score), 4) for score in distances[0]]}"
+    )
 
     results: list[dict[str, Any]] = []
     for dist, idx in zip(distances[0], indices[0]):
@@ -175,6 +193,14 @@ def search_local_horror_lore(
             }
         )
 
+    if results:
+        scores = [result["score"] for result in results]
+        logger.info(
+            f"Résultats FAISS : nb={len(results)}, score_min={min(scores):.4f}, "
+            f"score_max={max(scores):.4f}, score_moyen={sum(scores) / len(scores):.4f}"
+        )
+    else:
+        logger.warning("Aucun résultat FAISS pertinent")
     logger.info(
         f"Recherche FAISS : {len(results)} résultat(s) pour "
         f"'{query[:40]}...'"
@@ -221,24 +247,70 @@ def query_movie_metadata(
     """
     if not any([titre, id_film]):
         raise ValueError("Il faut fournir au moins 'titre' ou 'id_film'.")
+    logger.info(
+        f"Entrée métadonnées : mode={'par id' if id_film is not None else 'par titre'}, "
+        f"titre={titre!r}, id_film={id_film}, top_k={top_k}"
+    )
 
     with httpx.Client(timeout=10.0) as client:
         if id_film is not None:
             url = f"{DATA_API_URL}/films/{id_film}"
-            resp = client.get(url)
+            logger.debug(f"Appel HTTP GET : {url}")
+            debut = time.perf_counter()
+            try:
+                resp = client.get(url)
+            except httpx.TimeoutException:
+                logger.error(f"Timeout data-api : {url}")
+                raise
+            except httpx.RequestError as exc:
+                logger.error(f"Erreur réseau data-api : {exc}")
+                raise
+            logger.debug(
+                f"Réponse HTTP : statut={resp.status_code}, durée={(time.perf_counter() - debut) * 1000:.2f} ms"
+            )
 
             if resp.status_code == 404:
                 logger.warning(f"Film id={id_film} non trouvé sur data-api.")
                 return []
-            resp.raise_for_status()
-            return [resp.json()]
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    f"Erreur HTTP data-api : statut={exc.response.status_code}, "
+                    f"corps={exc.response.text[:200]}"
+                )
+                raise
+            data = resp.json()
+            logger.info("Métadonnées retournées : nb=1")
+            return [data]
 
         # Recherche textuelle
         url = f"{DATA_API_URL}/films/search"
         params = {"q": titre, "limit": top_k}
-        resp = client.get(url, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        logger.debug(f"Appel HTTP GET : {url}, paramètres={params}")
+        debut = time.perf_counter()
+        try:
+            resp = client.get(url, params=params)
+        except httpx.TimeoutException:
+            logger.error(f"Timeout data-api : {url}")
+            raise
+        except httpx.RequestError as exc:
+            logger.error(f"Erreur réseau data-api : {exc}")
+            raise
+        logger.debug(
+            f"Réponse HTTP : statut={resp.status_code}, durée={(time.perf_counter() - debut) * 1000:.2f} ms"
+        )
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                f"Erreur HTTP data-api : statut={exc.response.status_code}, "
+                f"corps={exc.response.text[:200]}"
+            )
+            raise
+        data = resp.json()
+        logger.info(f"Métadonnées retournées : nb={len(data)}")
+        return data
 
 
 def find_similar_horror_movies(
@@ -269,23 +341,51 @@ def find_similar_horror_movies(
     RuntimeError
         Si le film n'existe pas ou si son embedding est NULL.
     """
+    logger.info(f"Entrée recherche de similarité : id_film={id_film}, k={k}")
     url = f"{DATA_API_URL}/films/{id_film}/similar"
     params = {"k": k}
+    logger.debug(f"Appel HTTP GET : {url}, paramètres={params}")
 
     with httpx.Client(timeout=10.0) as client:
-        resp = client.get(url, params=params)
+        debut = time.perf_counter()
+        try:
+            resp = client.get(url, params=params)
+        except httpx.TimeoutException:
+            logger.error(f"Timeout data-api : {url}")
+            raise
+        except httpx.RequestError as exc:
+            logger.error(f"Erreur réseau data-api : {exc}")
+            raise
+        logger.debug(
+            f"Réponse HTTP : statut={resp.status_code}, durée={(time.perf_counter() - debut) * 1000:.2f} ms"
+        )
 
         if resp.status_code == 404:
+            logger.error(f"Film id={id_film} introuvable en base.")
             raise RuntimeError(f"Film id={id_film} introuvable en base.")
         if resp.status_code == 400:
             detail = resp.json().get("detail", "Colonne embedding NULL ou erreur métier.")
+            logger.error(f"Erreur métier data-api (400) : {detail}")
             raise RuntimeError(detail)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                f"Erreur HTTP data-api : statut={exc.response.status_code}, "
+                f"corps={exc.response.text[:200]}"
+            )
+            raise
         data = resp.json()
 
+    similarites = [float(item["similarite"]) for item in data if "similarite" in item]
+    details_similarite = (
+        f"similarités={[round(score, 4) for score in similarites]}, "
+        f"similarité_max={max(similarites):.4f}, similarité_min={min(similarites):.4f}"
+        if similarites else "similarités=[]"
+    )
     logger.info(
         f"pgvector similarity (via data-api) : {len(data)} voisin(s) "
-        f"trouvé(s) pour id_film={id_film}"
+        f"trouvé(s) pour id_film={id_film}; {details_similarite}"
     )
     return data
 
@@ -312,16 +412,48 @@ def fuzzy_find_film(
     dict | None
         ``{"id_film": int, "titre": str, "score": float}`` ou ``None``.
     """
+    logger.info(f"Entrée fuzzy : titre_brut={raw_title!r}, score_cutoff={score_cutoff}")
     url = f"{DATA_API_URL}/films/fuzzy"
     params = {"title": raw_title, "score_cutoff": score_cutoff}
+    logger.debug(f"Appel HTTP GET : {url}, paramètres={params}")
 
     with httpx.Client(timeout=10.0) as client:
-        resp = client.get(url, params=params)
+        debut = time.perf_counter()
+        try:
+            resp = client.get(url, params=params)
+        except httpx.TimeoutException:
+            logger.error(f"Timeout data-api : {url}")
+            raise
+        except httpx.RequestError as exc:
+            logger.error(f"Erreur réseau data-api : {exc}")
+            raise
+        logger.debug(
+            f"Réponse HTTP : statut={resp.status_code}, durée={(time.perf_counter() - debut) * 1000:.2f} ms"
+        )
 
         if resp.status_code == 404:
+            logger.warning(f"Aucun candidat fuzzy au-dessus du seuil {score_cutoff} pour « {raw_title} »")
             return None
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                f"Erreur HTTP data-api : statut={exc.response.status_code}, "
+                f"corps={exc.response.text[:200]}"
+            )
+            raise
+        data = resp.json()
+
+    logger.info(
+        f"Candidat fuzzy retenu : titre={data['titre']!r}, score={data['score']}, "
+        f"id_film={data['id_film']}"
+    )
+    if data["score"] < score_cutoff + 10:
+        logger.debug(
+            f"Avertissement : match fuzzy faible, score={data['score']} "
+            f"proche du seuil={score_cutoff}"
+        )
+    return data
 
 
 def resolve_film(raw_query: str, score_cutoff: float = 60.0) -> int:
@@ -345,8 +477,10 @@ def resolve_film(raw_query: str, score_cutoff: float = 60.0) -> int:
     RuntimeError
         Si aucun film ne correspond suffisamment.
     """
+    logger.info(f"Entrée résolution de film : requête_brute={raw_query!r}")
     match = fuzzy_find_film(raw_query, score_cutoff=score_cutoff)
     if match is None:
+        logger.error(f"Aucun film trouvé pour « {raw_query} ». Vérifiez l'orthographe.")
         raise RuntimeError(
             f"Aucun film trouvé pour « {raw_query} ». Vérifiez l'orthographe."
         )

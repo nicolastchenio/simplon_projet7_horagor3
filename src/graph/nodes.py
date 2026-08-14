@@ -14,6 +14,7 @@ que le moteur fusionnera dans l'``AgentState`` global.
 from __future__ import annotations
 
 import re
+from loguru import logger
 
 from src.config import OLLAMA_CHAT_MODEL, OLLAMA_BASE_URL
 from src.models.state import AgentState
@@ -60,6 +61,7 @@ def rag_node(state: AgentState) -> dict:
     # 1. Extraction de la requête utilisateur
     # ------------------------------------------------------------------
     user_query: str = state["query"]
+    logger.info(f"[RAG Node] Début de la recherche pour la requête : {user_query!r}")
 
     # ------------------------------------------------------------------
     # 2. Double interrogation du savoir local
@@ -70,10 +72,15 @@ def rag_node(state: AgentState) -> dict:
     # Les deux appels sont synchrones (séquentiels) car il s'agit d'un MVP.
     # Une optimisation future pourrait les lancer via asyncio.gather.
 
+    logger.debug("[RAG Node] Interrogation du savoir vectoriel (FAISS)...")
     vectorial_results = search_local_horror_lore(user_query)
-    structured_results = query_movie_metadata(user_query)
+    logger.debug(f"[RAG Node] Résultats vectoriels bruts : {type(vectorial_results).__name__}")
 
-        # ------------------------------------------------------------------
+    logger.debug("[RAG Node] Interrogation du savoir structuré (SQL)...")
+    structured_results = query_movie_metadata(user_query)
+    logger.debug(f"[RAG Node] Résultats structurés bruts : {type(structured_results).__name__}")
+
+    # ------------------------------------------------------------------
     # 3. Normalisation au contrat attendu par le router et la narration
     # ------------------------------------------------------------------
     # Le routeur (route_after_rag) et le narrateur partagent le même
@@ -95,6 +102,7 @@ def rag_node(state: AgentState) -> dict:
     else:
         raw_hits = []
 
+    logger.debug(f"[RAG Node] Normalisation de {len(raw_hits)} hit(s) FAISS bruts...")
     for idx, hit in enumerate(raw_hits):
         if not isinstance(hit, dict):
             continue
@@ -112,6 +120,11 @@ def rag_node(state: AgentState) -> dict:
         if score > best_faiss_score:
             best_faiss_score = score
 
+    logger.info(
+        f"[RAG Node] Vectoriel : {len(faiss_hits)} hit(s) normalisés, "
+        f"meilleur score = {best_faiss_score:.4f}"
+    )
+
     # --- Normalisation Structurée (SQL / métadonnées) ---
     structured_movies: list[dict] = []
     if isinstance(structured_results, dict):
@@ -122,6 +135,8 @@ def rag_node(state: AgentState) -> dict:
         )
     elif isinstance(structured_results, list):
         structured_movies = structured_results
+
+    logger.info(f"[RAG Node] Structuré : {len(structured_movies)} film(s) trouvé(s)")
 
     # --- Fallback structuré par rétro-action FAISS ---
     # Quand la requête en langage naturel est trop verbeuse,
@@ -134,7 +149,7 @@ def rag_node(state: AgentState) -> dict:
     #         m = re.search(r"(?i)Titre\s*:\s*([^\n\r|]+)", text)
     #         if m:
     #             titre_candidat = m.group(1).strip()
-    #             print(f"[RAG Node] Fallback SQL sur titre FAISS : {titre_candidat}")
+    #             logger.debug(f"[RAG Node] Fallback SQL sur titre FAISS : {titre_candidat}")
     #             fallback_result = query_movie_metadata(titre_candidat)
     #             if isinstance(fallback_result, dict):
     #                 candidates = (
@@ -148,6 +163,7 @@ def rag_node(state: AgentState) -> dict:
     #                 candidates = []
     #             if candidates:
     #                 structured_movies = candidates
+    #                 logger.debug(f"[RAG Node] Fallback SQL réussi : {len(candidates)} film(s)")
     #                 break
 
     rag_results = {
@@ -177,6 +193,8 @@ def rag_node(state: AgentState) -> dict:
         }
     )
 
+    logger.debug(f"[RAG Node] Métadonnées enrichies : {metadata}")
+
     # ------------------------------------------------------------------
     # 5. Synthèse pour l'historique de conversation
     # ------------------------------------------------------------------
@@ -199,6 +217,7 @@ def rag_node(state: AgentState) -> dict:
             f"{metadata['vectorial_chunks_count']} fragment(s) vectoriel(s) seul(s)."
         )
 
+    logger.info(f"[RAG Node] Résumé : {resume}")
     ai_summary = AIMessage(content=resume)
 
     # ------------------------------------------------------------------
@@ -208,6 +227,7 @@ def rag_node(state: AgentState) -> dict:
     # Grâce au reducer ``add_messages`` sur ``messages``, le résumé
     # est *ajouté* à la liste existante.
 
+    logger.debug("[RAG Node] Patch d'état préparé, retour au moteur LangGraph")
     return {
         "rag_results": rag_results,
         "metadata": metadata,
@@ -218,12 +238,15 @@ def rag_node(state: AgentState) -> dict:
 def scraper_node(state: AgentState) -> dict:
     """
     Node 2 : Agent Scraper (Peer-to-Peer).
-    Se déclenche uniquement sur décision du router.
+    Se déclenche uniquement sur décision du routeur.
     Lit rag_results ou query pour identifier le film, appelle enrich_from_web,
     et écrit le résultat structuré dans scraped_data.
     Edge fixe vers narration_node.
+
+    :param state: État partagé du graphe contenant ``query``, ``rag_results``.
+    :returns: Dictionnaire de patch contenant ``scraped_data`` et ``messages``.
     """
-    print(">>> Scraper Node")
+    logger.info("[Scraper Node] Démarrage du scraper web")
 
     query: str = state.get("query", "")
     rag_results = state.get("rag_results", {})
@@ -238,7 +261,7 @@ def scraper_node(state: AgentState) -> dict:
             movies = structured.get("movies", [])
             if movies:
                 movie_title = movies[0].get("title")
-                print(f"[Scraper] Titre extrait du SQL structuré : {movie_title}")
+                logger.debug(f"[Scraper] Titre extrait du SQL structuré : {movie_title!r}")
 
     # Priorité 2 : noms propres détectés dans la question utilisateur
     # On isole les mots capitalisés (hors premier mot de phrase) pour former
@@ -259,7 +282,7 @@ def scraper_node(state: AgentState) -> dict:
         ]
         if candidates:
             movie_title = " ".join(candidates)
-            print(f"[Scraper] Titre candidat depuis noms propres : {movie_title}")
+            logger.debug(f"[Scraper] Titre candidat depuis noms propres : {movie_title!r}")
 
     # Priorité 3 : titre depuis le meilleur hit FAISS (corpus vectoriel)
     if not movie_title and isinstance(rag_results, dict):
@@ -273,15 +296,17 @@ def scraper_node(state: AgentState) -> dict:
                 m = re.search(r"(?i)Titre\s*:\s*([^\n|\r]+)", text)
                 if m:
                     movie_title = m.group(1).strip()
-                    print(f"[Scraper] Titre extrait du hit FAISS : {movie_title}")
+                    logger.debug(f"[Scraper] Titre extrait du hit FAISS : {movie_title!r}")
 
     # Priorité 4 : dernier recours — query brute
     if not movie_title:
         movie_title = query.strip()
-        print(f"[Scraper] Titre fallback depuis query brute : {movie_title}")
-   
+        logger.debug(f"[Scraper] Titre fallback depuis query brute : {movie_title!r}")
+
     # ── Appel outil web ──
+    logger.debug(f"[Scraper] Appel enrich_from_web pour {movie_title!r}")
     raw_content = enrich_from_web(movie_title)
+    logger.debug(f"[Scraper] Contenu web récupéré : {type(raw_content).__name__}, succès={bool(raw_content)}")
 
     scraped_data = {
         "title": movie_title,
@@ -294,11 +319,12 @@ def scraper_node(state: AgentState) -> dict:
         f"contenu récupéré : {'oui' if scraped_data['success'] else 'non'}"
     )
 
+    logger.info(f"[Scraper Node] {summary}")
     return {
         "scraped_data": scraped_data,
         "messages": [AIMessage(content=summary)],
     }
-    
+        
     
 _narrator_llm: ChatOllama | None = None
 
@@ -306,6 +332,7 @@ _narrator_llm: ChatOllama | None = None
 def _get_narrator_llm() -> ChatOllama:
     global _narrator_llm
     if _narrator_llm is None:
+        logger.debug("[Narration] Instanciation du LLM Ollama (singleton)")
         _narrator_llm = ChatOllama(
             model=OLLAMA_CHAT_MODEL,
             temperature=0.7,
@@ -327,7 +354,13 @@ def narration_node(state: AgentState) -> dict:
     Les bruits techniques (résumés RAG / scraper) sont filtrés.
 
     Produits : final_answer, sources, messages (AIMessage).
+
+    :param state: État partagé du graphe contenant ``query``, ``rag_results``,
+        ``scraped_data``, ``messages``.
+    :returns: Dictionnaire de patch contenant ``final_answer``, ``sources``, ``messages``.
     """
+    logger.info("[Narration Node] Démarrage du nœud de narration")
+
     # ── 0. RÉCUPÉRATION DE LA MÉMOIRE CONVERSATIONNELLE DU THREAD ──
     # On filtre les bruits techniques (logs RAG / scraper) pour ne garder
     # que les échanges réels entre le lecteur et le chroniqueur.
@@ -338,6 +371,7 @@ def narration_node(state: AgentState) -> dict:
         elif isinstance(msg, AIMessage):
             # On saute les résumés des nœuds internes
             if msg.content.startswith("Recherche RAG") or msg.content.startswith("🔍 Scraping"):
+                logger.debug("[Narration] Filtrage du bruit technique RAG/Scraper")
                 continue
             # Pour le message de narration, on isole la réponse textuelle proprement dite
             text = msg.content
@@ -349,12 +383,13 @@ def narration_node(state: AgentState) -> dict:
     memory_block = ""
     if len(dialogue_history) > 1:
         memory_block = "--- CONTEXTE DU DIALOGUE ---\n" + "\n".join(dialogue_history[:-1]) + "\n\n"
-    
-    print(">>> Narration Node")
+        logger.debug(f"[Narration] Historique du thread : {len(dialogue_history) - 1} message(s) contextualisé(s)")
 
     query: str = state.get("query", "")
     rag = state.get("rag_results") or {}
     scraped = state.get("scraped_data") or {}
+
+    logger.debug(f"[Narration] Query : {query!r}")
 
     # ── 1. CONSTRUCTION DU CORPUS (seules données autorisées) ──
     context_blocks: list[str] = []
@@ -363,6 +398,7 @@ def narration_node(state: AgentState) -> dict:
     structured = rag.get("structured", {}) if isinstance(rag, dict) else {}
     movies = structured.get("movies", []) if isinstance(structured, dict) else []
     if movies:
+        logger.debug(f"[Narration] Intégration de {len(movies)} fiche(s) structurée(s)")
         context_blocks.append("=== FICHES CINÉMATOGRAPHQUES (Base structurée) ===")
         for m in movies:
             titre = m.get("title") or m.get("titre") or "Inconnu"
@@ -377,6 +413,7 @@ def narration_node(state: AgentState) -> dict:
     faiss_data = rag.get("faiss", {}) if isinstance(rag, dict) else {}
     hits = faiss_data.get("hits", []) if isinstance(faiss_data, dict) else []
     if hits:
+        logger.debug(f"[Narration] Intégration de {min(3, len(hits))} hit(s) FAISS")
         context_blocks.append("=== EXTRAITS DE LORE & CRITIQUES (Index vectoriel) ===")
         for idx, hit in enumerate(hits[:3], 1):
             text = hit.get("text") or hit.get("chunk") or ""
@@ -386,6 +423,7 @@ def narration_node(state: AgentState) -> dict:
 
     # 1c. Enrichissement web (Scraper)
     if isinstance(scraped, dict) and scraped.get("success"):
+        logger.debug(f"[Narration] Enrichissement web intégré pour {scraped.get('title')!r}")
         context_blocks.append("=== ENRICHISSEMENT WEB ===")
         context_blocks.append(f"Titre analysé : {scraped.get('title', 'N/A')}")
         content = scraped.get("content", "")
@@ -395,6 +433,8 @@ def narration_node(state: AgentState) -> dict:
     encyclopedic_context = "\n\n".join(context_blocks) if context_blocks else (
         "Aucune donnée encyclopédique n'a été récupérée pour cette requête."
     )
+
+    logger.debug(f"[Narration] Corpus d'encyclopédie construit : {len(encyclopedic_context)} caractères")
 
     # ── 2. APPELS DÉTERMINISTES DES OUTILS ANNEXES ──
     tool_blocks: list[str] = []
@@ -409,9 +449,10 @@ def narration_node(state: AgentState) -> dict:
                     age = calculate_movie_age(yr)
                     titre = m.get("title") or m.get("titre") or "Film inconnu"
                     ages_lines.append(f"- {titre} ({yr}) : {age} ans.")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"[Narration] Outil âge échoué pour {yr} : {e}")
         if ages_lines:
+            logger.debug(f"[Narration] Outil âge : {len(ages_lines)} calcul(s)")
             tool_blocks.append("=== ÂGES DES FILMS ===")
             tool_blocks.extend(ages_lines)
 
@@ -422,30 +463,34 @@ def narration_node(state: AgentState) -> dict:
         ref_id = movies[0].get("id") or movies[0].get("id_film")
         if ref_id:
             try:
+                logger.debug(f"[Narration] Outil similarité pour ref_id={ref_id}")
                 voisins = find_similar_horror_movies(ref_id, k=3)
                 if voisins:
+                    logger.debug(f"[Narration] Similarité : {len(voisins)} voisin(s) trouvé(s)")
                     tool_blocks.append("=== RECOMMANDATIONS PAR SIMILARITÉ ===")
                     for v in voisins:
                         tool_blocks.append(
                             f"- {v.get('titre')} ({v.get('annee_sortie')}) — proximité={v.get('similarite', 'N/A')}"
                         )
             except Exception as exc:
-                print(f"[Narration] Outil similarité indisponible : {exc}")
+                logger.warning(f"[Narration] Outil similarité indisponible : {exc}")
 
     # Outil : simulateur de survie horreur
     survival_kw = ["survivre", "survie", "survival", "tuerie", "slash", "massacre", "fuir", "plan de fuite"]
     wants_survival = any(k in query.lower() for k in survival_kw)
     if wants_survival:
         try:
-            # Adapte la signature si horror_survival_simulator n'a pas exactement ces args
             titre_cible = movies[0].get("title") or movies[0].get("titre") or query if movies else query
+            logger.debug(f"[Narration] Outil survie pour {titre_cible!r}")
             result_surv = horror_survival_simulator(titre_cible, user_role="spectateur")
             tool_blocks.append("=== SIMULATEUR DE SURVIE ===")
             tool_blocks.append(str(result_surv))
         except Exception as exc:
-            print(f"[Narration] Outil survie indisponible : {exc}")
+            logger.warning(f"[Narration] Outil survie indisponible : {exc}")
 
     tool_context = "\n".join(tool_blocks) if tool_blocks else ""
+    if tool_context:
+        logger.debug(f"[Narration] Contexte d'outils enrichi : {len(tool_blocks)} bloc(s)")
 
     # ── 3. PROMPT SYSTÈME ULTRA-SPÉCIALISÉ (anti-hallucination) ──
     system_prompt = (
@@ -477,7 +522,10 @@ def narration_node(state: AgentState) -> dict:
     ])
     human_prompt = "\n".join(human_parts)
 
+    logger.debug(f"[Narration] Prompt système et humain préparés ({len(human_prompt)} caractères)")
+
     # ── 4. INVOCATION LLM (seul coût cognitif du pipeline) ──
+    logger.info("[Narration] Invocation du LLM Ollama pour narration...")
     try:
         llm = _get_narrator_llm()
         response = llm.invoke([
@@ -485,8 +533,9 @@ def narration_node(state: AgentState) -> dict:
             HumanMessage(content=human_prompt)
         ])
         final_answer = str(response.content)
+        logger.info(f"[Narration] LLM invocation réussie : {len(final_answer)} caractères générés")
     except Exception as exc:
-        print(f"[Narration] Échec invocation LLM : {exc}")
+        logger.opt(exception=True).error(f"[Narration] Échec invocation LLM : {exc}")
         final_answer = (
             "Les archives gothiques se taisent... Le démon Ollama semble endormi. "
             "Revenez quand les lanternes seront de nouveau allumées."
@@ -515,8 +564,11 @@ def narration_node(state: AgentState) -> dict:
             "source": "wikipedia",
         })
 
+    logger.debug(f"[Narration] Sources structurées : {len(sources)} source(s)")
+
     # ── 6. RETOUR ──
     summary = f"🖋️ Narration générée ({len(final_answer)} caractères) — {len(sources)} source(s)."
+    logger.info(f"[Narration Node] {summary}")
     return {
         "final_answer": final_answer,
         "sources": sources,

@@ -2086,7 +2086,6 @@ Plan :
           Chaque appel /chat vérifiera si le token expire dans < 5 min  
           Si oui, refresh automatique avant même que ça échoue ! ✨  
 
-
 ## 7.3 Communication chiffrée ##
 
 Le sujet dit : « L'interface utilisateur doit elle aussi être isolée dans son conteneur et assurer une communication chiffrée et sécurisée vers l'API d'IA. » => Direction précise : « vers l'API d'IA » (Streamlit → Intelligence API).
@@ -2283,3 +2282,1266 @@ Streamlit n'a pas besoin d'être en HTTPS parce que :
 - La sécurité TLS se fait entre les conteneurs Docker (réseau interne)
 
 Le certificat auto-signé (cert.pem) est uniquement pour l'API Intelligence (communication conteneur-à-conteneur).
+
+# Phase 8 : Monitoring avec Langfuse, Loguru et la stack Prometheus #
+## 8.1 Langfuse ##
+
+sources :
+- https://github.com/langfuse/langfuse
+- https://langfuse.com/
+- https://www.datacamp.com/tutorial/langfuse?utm_cid=23552157100&utm_aid=188237542690&utm_campaign=230119_1-ps-other~dsa-tofu~ai_2-b2c_3-emea_4-prc_5-na_6-na_7-le_8-pdsh-go_9-nb-e_10-na_11-na&utm_loc=9218685-&utm_mtd=-c&utm_kw=&utm_source=google&utm_medium=paid_search&utm_content=ps-other~emea-en~dsa~tofu~tutorial~artificial-intelligence&gad_source=1&gad_campaignid=23552157100&gbraid=0AAAAADQ9WsFFDQVglWF5tu8tt0306wgvu&gclid=CjwKCAjwvZHTBhAlEiwA1ug5P3jZNXH5qRbSxZVTJ6T50ft5pfNSnFIqH8WAUscK_PfiI4tjlCnnVhoCx68QAvD_BwE
+- 
+
+Langfuse est un outil de monitoring open-source qui trace, évalue et calcule le coût
+de chaque étape de vos agents LLM en temps réel.
+
+Imagine que ton agent HorRAGor est une boîte noire. Quand un utilisateur pose une question, il se passe plein de choses invisibles :
+```
+Question utilisateur
+   ↓
+[RAG Node]      → cherche dans FAISS (combien de temps ? quels résultats ?)
+   ↓
+[Router]        → décide : enrichir via web ou pas ? (pourquoi cette décision ?)
+   ↓
+[Scraper Node]  → va sur Wikipedia (a-t-il réussi ? combien de temps ?)
+   ↓
+[Narration]     → génère la réponse avec le LLM (combien de tokens ? quel coût ?)
+   ↓
+Réponse finale
+```
+
+Langfuse est un outil d'observabilité (observability) spécialisé pour les applications LLM. Langfuse va montrer :
+
+| Ce que tu vois | Utilité concrète |
+|---|---|
+| 🕐 **Latence par étape** | "Le RAG prend 8s, c'est lui le goulot d'étranglement" |
+| 🔢 **Tokens consommés** | "Cette réponse a coûté 1200 tokens" |
+| 📊 **Traces complètes** | Voir l'arbre RAG → Router → Narration pour chaque requête |
+| 🐛 **Erreurs** | "Le scraper a planté sur cette question précise" |
+| 💬 **Prompts exacts** | Voir le prompt EXACT envoyé au LLM (très utile pour débugger) |
+
+
+Vocabulaire important
+- Trace : l'enregistrement complet d'une requête (de la question à la réponse)
+- Span : une sous-étape dans une trace (ex: le RAG Node est un span)
+- CallbackHandler : le "mouchard" qu'on branche sur LangGraph pour qu'il envoie automatiquement les infos à Langfuse
+
+Plan d'action :
+
+| Étape | Action | Fichier concerné |
+|---|---|---|
+| **A** | Installer Langfuse en local (Docker) | Terminal |
+| **B** | Créer un compte local + projet → récupérer les clés | Navigateur (`localhost:3000`) |
+| **C** | Installer le package Python `langfuse` | `pyproject.toml` |
+| **D** | Ajouter les clés dans les fichiers `.env` | `.env`, `.env.example`, `.env.docker` |
+| **E** | Configurer `src/config.py` | `src/config.py` |
+| **F** | Créer un helper Langfuse | `src/observability/langfuse_client.py` |
+| **G** | Brancher le callback dans `main.py` | `src/main.py` |
+| **H** | Tester et vérifier dans l'interface | Navigateur |
+
+### étape A : Installer Langfuse en local
+
+La distinction fondamentale : Langfuse Serveur vs Langfuse Client
+
+| | Le **SERVEUR** Langfuse | Le **CLIENT** Langfuse |
+|---|---|---|
+| **C'est quoi ?** | L'application web complète (le `git clone`) | Le petit package Python (`uv add langfuse`) |
+| **Rôle** | Stocke et affiche les traces (l'interface sur `:3000`) | Envoie les traces depuis ton code |
+| **Où ?** | Un **service externe** qui tourne à côté | **Dans** ton projet `horragor-project` |
+| **Analogie** | Le **serveur de mails** (Gmail) | Ton **application mail** (Outlook) |
+
+- Seul le CLIENT (uv add langfuse) va dans ton projet.
+- Le SERVEUR (git clone) est une infrastructure séparée, comme ta base Supabase.
+
+=>  on n'installera pas le serveur dans notre projet horragor-project/ mais dans un un projet (dossier) "langfuse" a part:
+
+```
+C:\Users\toi\Projets\           ← Le  dossier de travail général
+│
+├── horragor-project/           ← Le projet (inchangé)
+│   ├── src/
+│   ├── docker-compose.yml
+│   └── ...
+│
+└── langfuse/                   ← Le git clone VA ICI (À CÔTÉ, pas dedans !)
+    ├── docker-compose.yml       ← Le compose de Langfuse
+    └── ...
+```
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ DISQUE                                              │
+│                                                          │
+│  ┌──────────────────────┐    ┌────────────────────────┐ │
+│  │  horragor-project/   │    │  langfuse/             │ │
+│  │                      │    │                        │ │
+│  │  uv add langfuse ────┼───►│  (serveur sur :3000)   │ │
+│  │  (le CLIENT)         │    │  docker compose up -d  │ │
+│  │                      │    │                        │ │
+│  │  Le code envoie     │    │  reçoit et affiche     │ │
+│  │  les traces  ───────────► │  les traces            │ │
+│  └──────────────────────┘    └────────────────────────┘ │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+Pour information un seul serveur Langfuse (ici en local) peut suivre plusieurs projets LLM différents en parallèle car c'est une plateforme de monitoring mutualisée
+```
+┌──────────────────────────────────────────────────────┐
+│  SERVEUR LANGFUSE (localhost:3000)                    │
+│  (une seule installation Docker)                      │
+│                                                       │
+│  ┌─────────────────┐  ┌─────────────────┐            │
+│  │ Projet          │  │ Projet          │            │
+│  │ "HorRAGor"      │  │ "Chatbot-RH"    │  ...       │
+│  │                 │  │                 │            │
+│  │ pk-lf-aaa...    │  │ pk-lf-bbb...    │            │
+│  │ sk-lf-aaa...    │  │ sk-lf-bbb...    │            │
+│  └────────▲────────┘  └────────▲────────┘            │
+│           │                    │                     │
+└───────────┼────────────────────┼─────────────────────┘
+            │                    │
+   ┌────────┴────────┐   ┌───────┴─────────┐
+   │ horragor-project│   │ autre-projet-llm│
+   │ (clés HorRAGor) │   │ (clés Chatbot)  │
+   └─────────────────┘   └─────────────────┘
+   ```
+Chaque projet a ses clés uniques (pk-lf-... / sk-lf-...). C'est la clé qui aiguille les traces vers le bon projet dans l'interface. Les traces ne se mélangent jamais.
+
+A noter que Langfuse a besoin de PostgreSQL, ClickHouse et Redis :
+- PostgreSQL → stocke les projets, users, clés API
+- ClickHouse → base analytique ultra-rapide pour stocker les millions de traces/tokens
+- Redis → cache et file d'attente pour absorber les pics de traces
+
+Actions a faire :
+1. Créer un dossier de travail "langfuse" (en dehors de horragor-project)
+2. Entrer dans ce dossier =>  ` cd langfuse `
+3. Cloner le dépôt officiel de Langfuse  
+` git clone https://github.com/langfuse/langfuse.git `
+4. Lance Langfuse (ça télécharge PostgreSQL, ClickHouse, Redis... sois patient)  
+` docker compose up -d `  
+    Note 1 j ai eu un probleme car Windows limite a 260 caractères les chemins de fichiers.  
+    solution :
+    - Activer les chemins longs dans Git => Ouvrir un terminal en administrateur et lancer : ` git config --global core.longpaths true `
+    - supprimer le dossier langfuse car cassé 
+    - et recreer ce dossier et recloner 
+
+    Note 2 j ai eu un autre probleme le port 5432 etait deja utilisé:  
+    "Error response from daemon: ports are not available: exposing port TCP 127.0.0.1:5432 -> 127.0.0.1:0: listen tcp4 127.0.0.1:5432: bind: An attempt was made to access a socket in a way forbidden by its access permissions."  
+    Cause : un PostgreSQL local (ou un autre conteneur) occupe déjà le port 5432 sur
+    l'hôte.
+
+    Solution — dans le `docker-compose.yml` de Langfuse, service `postgres` :
+        ```
+        postgres:
+            image: postgres:17
+            ...
+            ports:
+            - 127.0.0.1:5432:5432    # AVANT
+        ```
+    - Changer uniquement le port de gauche en 5433
+        ```
+        ports:
+            - 127.0.0.1:5433:5432    # APRÈS
+        ```
+    - Sauvegarder (Ctrl+S) et relance
+        ```
+        docker compose down
+        docker compose up -d
+        ```
+        Quelques remarques sur le fichier `docker-compose.yml` :  
+        ⚠️ Note sécurité — valeurs par défaut
+
+        Cette installation utilise les secrets par défaut du docker-compose.yml
+        (marqués `# CHANGEME`). Acceptable en local, à changer impérativement
+        avant toute exposition réseau ou mise en production :
+
+        - SALT, NEXTAUTH_SECRET : `openssl rand -base64 32`
+        - ENCRYPTION_KEY : `openssl rand -hex 32`
+        - POSTGRES_PASSWORD, REDIS_AUTH, CLICKHOUSE_PASSWORD : mots de passe forts
+
+        ⚠️ Changer ENCRYPTION_KEY après avoir créé des clés API rend celles-ci
+        illisibles. Le faire AVANT le premier démarrage, ou repartir d'un
+        `docker compose down -v`.
+
+   - Vérifier que tout tourne ` docker compose ps `  
+        → les 6 services doivent être Up, et postgres/clickhouse/redis/minio (healthy)
+   - Ouvrir http://localhost:3000 dans le navigateur (on voit la page de connexion Langfuse)
+
+    Note 3 — "Cette page ne fonctionne pas" : Langfuse pointait vers une base
+    Supabase distante
+
+    Diagnostic : ` docker compose logs langfuse-web `  
+    Sortie :  
+        ```
+        Datasource "db": PostgreSQL database "postgres", schema "public"
+        at "aws-1-eu-central-1.pooler.supabase.com:5432"
+        Error: P3005 The database schema is not empty.
+        ```
+
+    Cause : des variables DATABASE_URL / DIRECT_URL d'un autre projet
+    (Supabase) étaient présentes dans l'environnement et écrasaient les valeurs par
+    défaut du docker-compose.yml. Résultat : Prisma tentait ses migrations sur une
+    base distante déjà remplie → boucle infinie de crashs.
+
+    ⚠️ Piège à éviter : ne PAS créer de fichier .env à partir de
+    .env.dev.example. Ce fichier est destiné au développement local hors Docker
+    (les hosts y sont localhost, pas les noms de services Docker). Docker Compose
+    lit automatiquement tout .env présent dans le dossier et ses valeurs
+    localhost écrasent les bonnes valeurs → le conteneur ne trouve plus la base.
+    Le docker-compose.yml officiel de Langfuse est auto-suffisant : il contient
+    déjà toutes les variables nécessaires avec les bons hosts Docker.
+
+    Solution :
+      1) S'il existe un .env dans le dossier langfuse/, le renommer pour que
+     Docker Compose l'ignore : ` ren .env .env.local ` => perso j ai renommer en ` .env.local `
+      2) Supprimer toute directive env_file ajoutée dans le docker-compose.yml :
+          ```
+          langfuse-web:
+              image: docker.io/langfuse/langfuse:3
+              restart: always
+              env_file:          # ← SUPPRIMER CES 2 LIGNES
+              - .env           # ← SUPPRIMER
+              environment:
+              ...
+          ```
+     3) Vérifier qu'aucune variable ne traîne dans l'environnement Windows :
+          ```
+          echo %DATABASE_URL%
+          echo %DIRECT_URL%
+          ```
+          → doit afficher littéralement %DATABASE_URL% (= variable inexistante).
+          Sinon : set DATABASE_URL= et set DIRECT_URL=
+
+
+     4) (Optionnel (ce que je n ai pas fait), pour verrouiller définitivement) Écrire les valeurs en dur dans le docker-compose.yml, sans la syntaxe ${...} qui autorise
+     l'écrasement par une variable externe. Dans le bloc environment de
+     langfuse-web ET dans l'ancre &langfuse-worker-env :
+          ```
+          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+          DIRECT_URL: postgresql://postgres:postgres@postgres:5432/postgres
+          ```
+     5) Vérifier la config résolue par Docker Compose avant de lancer :  
+      ` docker compose config | findstr DATABASE_URL `  
+      → doit afficher @postgres:5432 (et non localhost ni une URL Supabase).
+
+      Note 4 — Le conteneur restait bloqué sur localhost:5432 malgré la correction
+      Symptôme déroutant : docker compose config affichait la bonne valeur
+      (@postgres:5432) mais le conteneur continuait à crasher avec
+      Can't reach database server at localhost:5432.
+
+      Vérification : ` docker inspect langfuse-langfuse-web-1 --format "{{json .Config.Env}}" | findstr /i DATABASE_URL `  
+
+      → affichait encore @localhost:5432
+
+      Cause : les variables d'environnement sont injectées à la création du
+      conteneur, jamais à son redémarrage. Le conteneur crashait en boucle
+      (restart: always) et Docker le relançait sans jamais le recréer → il gardait
+      figée la config du premier lancement, quand le .env fautif était encore lu.
+
+      Solution :  
+        ```
+        docker compose down -v --remove-orphans
+        docker ps -a --filter "name=langfuse"      # doit ne rien retourner
+        docker compose up -d --force-recreate
+        ```
+
+      Vérifier que le nouveau conteneur a bien la bonne config : ` docker inspect langfuse-langfuse-web-1 --format "{{json .Config.Env}}" | findstr /i DATABASE_URL `  
+      → DATABASE_URL=postgresql://postgres:postgres@postgres:5432/postgres ✅
+
+      Réflexe de debug à retenir : quand un conteneur semble ignorer une
+      correction de configuration, comparer
+      - docker compose config → la config théorique (fichiers YAML + .env
+      - docker inspect <conteneur> → la config réelle du conteneur qui tourne
+
+      Si les deux divergent, le conteneur est obsolète : il faut le recréer, pas le redémarrer.
+
+      | Commande | Recrée le conteneur ? |
+      |---|---|
+      | `docker compose restart` | ❌ Non — relance le process, config figée |
+      | `docker compose up -d` | ⚠️ Seulement si Compose détecte un changement |
+      | `docker compose up -d --force-recreate` | ✅ Toujours |
+      | `docker compose down` + `up -d` | ✅ Oui (sauf conteneurs orphelins) |
+
+5) Vérifier les logs jusqu'au démarrage complet :  
+   ` docker compose logs -f langfuse-web `  
+   Attendre ✓ Ready in XXXXms (le premier lancement prend 1 à 3 minutes : migrations PostgreSQL + ClickHouse).
+6) Ouvrir http://localhost:3000 → la page de connexion Langfuse s'affiche
+
+### étape B :  Créer un compte local + projet → récupérer les clés
+
+1. Créer le compte  
+    Cliquer sur « No account yet? Sign up » (lien sous le formulaire) et remplir :
+
+    | Champ | Valeur suggérée |
+    |---|---|
+    | **Name** | nicolas tchenio |
+    | **Email** | `nicolas.tchenio@gmail.com` (aucun mail n'est envoyé, pas de vérification) |
+    | **Password** | 8 caractères minimum => ` m@tdepasse123 ` — **noter-le**, pas de reset possible sans SMTP configuré |
+
+    → Sign up  
+    💡 Comme aucun serveur SMTP n'est configuré (SMTP_CONNECTION_URL est vide), il n'y a ni mail de confirmation ni récupération de mot de passe. Garde ses identifiants quelque part.
+
+2. Créer l'organisation  
+    Langfuse demande de créer une organisation.
+    Organization name : Simplon (ou ce que tu veux)
+    → Create
+3. Inviter des membres  
+    Écran suivant : invitation de membres. Skip — je suis seul.
+4. Créer le projet  
+    Project name : HorRAGor
+    → Create
+5. Générer les clés API  
+    Sur le dashboard du projet, aller dans:  
+    Settings (menu latéral gauche) → API Keys → + Create new API key
+
+    - On obtient :
+
+        ```
+        Secret Key : sk-lf-9cd12075-9695-4229-be6d-0d38fdfb28c9   ← affichée UNE SEULE FOIS
+        Public Key : pk-lf-ad9c9977-cdec-402f-b3b8-eee965f4d213
+        Host       : http://localhost:3000
+        ```
+
+    - Copier les trois immédiatement dans le .env du projet HorRAGor (pas dans le dossier langfuse/) : 
+
+        ```
+        # .env  (à la racine de ton projet HorRAGor)  
+        LANGFUSE_SECRET_KEY=sk-lf-...  
+        LANGFUSE_PUBLIC_KEY=pk-lf-...  
+        LANGFUSE_HOST=http://localhost:3000
+        ```
+
+    - Mets à jour .env.example (documentation pour les autres)
+        ```
+        # .env.example
+
+        # ===== LANGFUSE =====
+        LANGFUSE_SECRET_KEY=sk-lf-your-secret-key-here
+        LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key-here
+        LANGFUSE_HOST=http://localhost:3000
+        ```
+
+    - Mets à jour .env.docker (pour Docker Compose)
+        ```
+        # .env.docker
+
+        # ===== LANGFUSE =====
+        LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        LANGFUSE_HOST=http://host.docker.internal:3000
+        ```
+
+### étape C : Installer le package Python `langfuse` | `pyproject.toml` | ### 
+Dans notre projet "horragor-project" ajouter le package avec uv ` uv add langfuse `
+
+### étape d : Ajouter les clés dans les fichiers .env ().env, .env.example, .env.docker)
+
+On a deux stacks différents dans les réseaux Docker  :
+- Langfuse → réseau par défaut du projet langfuse (dossier langfuse/)
+- HorRAGor → réseau horragor-net (bridge dédié)
+
+Deux options :
+- Option A — la plus simple (recommandée pour l'instant):  
+    Utiliser host.docker.internal, que l'on a déjà configuré pour Ollama dans intelligence-api :
+    ```
+    # .env.docker
+    LANGFUSE_HOST=http://host.docker.internal:3000
+    ```
+    Ça fonctionne car Langfuse expose bien 3000:3000 sur l'hôte. Et on a déjà dans "docker-compose.yml" :
+    ```
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
+    
+- Option B — réseau partagé (plus « propre », plus tard) :  
+Créer un réseau externe commun et le rattacher aux deux stacks. À garder pour une phase d'industrialisation.
+
+J' ai choisi l option A :
+- Le conteneur doit avoir été recréé après ta modif de .env.docker => ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-recreate intelligence-api `
+- Vérifier les variables  :
+    ```
+    docker exec horragor-ia printenv LANGFUSE_HOST
+    docker exec horragor-ia printenv LANGFUSE_PUBLIC_KEY
+    docker exec horragor-ia printenv LANGFUSE_SECRET_KEY
+    ```
+    Attendu :
+    ```
+    http://host.docker.internal:3000
+    pk-lf-...
+    sk-lf-...
+    ```
+- Test de vérification :
+```
+# Depuis ton PC
+curl http://localhost:3000/api/public/health
+
+# Depuis le conteneur HorRAGor
+docker exec horragor-ia python -c "import httpx; print(httpx.get('http://host.docker.internal:3000/api/public/health').text)"
+```
+Les deux doivent répondre. Si le second échoue, c'est un souci de pare-feu Windows sur le port 3000.
+
+### étape E : Charger la config Langfuse dans le code
+Maintenant que les variables arrivent bien dans le conteneur, il faut que Python les lise. C'est le rôle de src/config.py.
+
+juste après la section Ollama / LLM pour respecter ta logique de regroupement thématique rajouter
+```
+# ─────────────────────────────────────────────
+# OBSERVABILITÉ — Langfuse (Phase 8.1)
+# ─────────────────────────────────────────────
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+
+# Le tracing ne s'active que si les DEUX clés sont renseignées.
+# → l'application reste 100 % fonctionnelle sans Langfuse (CI, tests, démo hors-ligne).
+LANGFUSE_ENABLED: bool = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
+```
+note ⚠️ Un piège lié à ta ligne 26 :  
+` load_dotenv(dotenv_path=_ENV_PATH, override=True) `  
+Le override=True signifie que le .env écrase les variables d'environnement Docker. En local hors conteneur c'est ce que l'on veut. Mais dans le conteneur, si un fichier .env était monté ou copié dans l'image, il écraserait les valeurs de .env.docker que tu viens de valider.
+Vérifier donc que .env n'est pas dans l'image :  
+` docker exec horragor-ia ls -la /app/.env `  
+→ Attendu : No such file or directory. Si le fichier existe, ajoute .env à ton .dockerignore.
+
+Test de validation de l'étape E :
+- Après la modification, Rebuild pour intégrer le nouveau config.py dans l'image : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+
+    A retenir toute modification dans src exige un rebuild car  Le volume src/ n'était pas monté dans mon"docker-compose.dev.yml".
+
+- puis : ` docker exec horragor-ia python -c "from src import config; print('HOST:', config.LANGFUSE_HOST); print('ENABLED:', config.LANGFUSE_ENABLED); print('PK ok:', config.LANGFUSE_PUBLIC_KEY.startswith('pk-lf-'))" `
+
+    Attendu :
+    ```
+    HOST: http://host.docker.internal:3000
+    ENABLED: True
+    PK ok: True
+    ```
+    Si ENABLED: False → les clés ne remontent pas jusqu'à Python → c'est le piège du override=True ci-dessus.
+
+### étape F, G, H	
+Langfuse s'intègre à LangGraph via un CallbackHandler : un objet qu'on passe dans le config de graph.invoke(). LangChain/LangGraph appellent alors automatiquement ce handler à chaque étape (début de nœud, appel LLM, fin, erreur) et Langfuse construit une trace hiérarchique :
+```
+Trace "horragor-chat"
+├── rag_node          (durée, input, output)
+│   └── OllamaEmbeddings   (tokens, latence)
+├── scraper_node      (si déclenché)
+└── narration_node
+    └── ChatOllama    (prompt complet, réponse, tokens)
+```
+Le principe clé : on ne touche pas aux nœuds. Toute l'instrumentation se fait au point d'entrée (src/main.py), là où on invoque le graphe. C'est ce qui rend Langfuse non-intrusif.
+
+| Choix technique | Justification |
+|---|---|
+| **Module dédié `observability/`** | Découplage : le code métier ne connaît pas Langfuse. Changer d'outil = modifier un seul fichier. |
+| **Dégradation gracieuse** | L'observabilité ne peut pas faire tomber la production. Trois niveaux de garde-fou (config, import, instanciation). |
+| **`flush()` au shutdown** | Le buffer est asynchrone : sans flush, les dernières traces sont perdues à l'arrêt du conteneur. |
+
+1) Créer un dossier "src/observability/" avec un
+   - "__init__.py" vide
+   - "langfuse_client.py" 
+    Ce module isole toute la logique Langfuse. Avantage : si Langfuse est indisponible ou désactivé, l'application continue de fonctionner normalement (dégradation gracieuse).
+    etape F helper Langfuse => avec get_langfuse_handler() et flush_langfuse()
+2) Modifier "src/main.py" :  
+étape G brancher le callback
+   - Ajouter l'import (après from src.auth.security import verify_access_token)
+       ```
+       # ═══════════════════════════════════════════════════════════════
+       # Observabilité (Phase 8) — import non bloquant
+       # ═══════════════════════════════════════════════════════════════
+       # Ce module ne lève jamais d'exception : si Langfuse est indisponible,
+       # get_langfuse_handler() retourne None et l'agent fonctionne normalement.
+       from src.observability.langfuse_client import (
+           flush_langfuse,
+           get_langfuse_handler,
+       )
+       ```
+   - Modifier le lifespan pour vider le buffer à l'extinction
+       ```
+       @asynccontextmanager
+       async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+           """Cycle de vie de l'application FastAPI.
+
+           **Au démarrage** : compile le graphe LangGraph une seule fois et
+           initialise le handler Langfuse (les logs indiquent s'il est actif).
+
+           **À l'extinction** : force l'envoi des traces Langfuse encore en
+           mémoire tampon, afin de ne perdre aucune observation.
+           """
+           global _compiled_graph
+
+           # ── DÉMARRAGE ──
+           print("🕯️  Compilation du graphe HorRAGor...")
+           _compiled_graph = build_horragor_graph()
+           print("✅ Graphe compilé et prêt.")
+
+           # Initialisation anticipée de l'observabilité : provoque l'affichage
+           # du log "✅ Langfuse actif" (ou de l'avertissement) dès le boot,
+           # plutôt qu'à la première requête utilisateur.
+           get_langfuse_handler()
+
+           yield  # ─── L'application sert les requêtes ici ───
+
+           # ── EXTINCTION ──
+           # Le buffer Langfuse est asynchrone : sans ce flush, les dernières
+           # traces seraient perdues à l'arrêt du conteneur.
+           flush_langfuse()
+           print("🌙 Extinction du serveur HorRAGor.")
+       ```
+       Adapte les print à ce que contient déjà ton lifespan — garde ta logique existante, ajoute seulement get_langfuse_handler() avant le yield et flush_langfuse() après.
+
+   - Injecter le handler dans chat_endpoint :
+       Remplacer la ligne actuelle : ` config = {"configurable": {"thread_id": thread_id}}`
+
+       par ce bloc :
+       ```
+       # ═══════════════════════════════════════════════════════════════
+       # Configuration LangGraph + Observabilité Langfuse
+       # ═══════════════════════════════════════════════════════════════
+       # `configurable.thread_id` : clé du checkpointer (mémoire de session).
+       # `callbacks`              : liste de handlers LangChain. Langfuse y
+       #                            observe automatiquement chaque nœud du
+       #                            graphe et chaque appel LLM/embedding.
+       # `metadata`               : enrichissements visibles dans l'UI
+       #                            Langfuse, très utiles pour filtrer les
+       #                            traces (par utilisateur, par session).
+       # `run_name`               : nom lisible de la trace dans l'UI.
+       # ═══════════════════════════════════════════════════════════════
+       langfuse_handler = get_langfuse_handler()
+
+       graph_config: dict[str, Any] = {
+           "configurable": {"thread_id": thread_id},
+           "run_name": "horragor-chat",
+           "metadata": {
+               # Préfixes spéciaux reconnus par Langfuse pour alimenter
+               # ses filtres natifs dans l'interface web :
+               "langfuse_user_id": username,
+               "langfuse_session_id": thread_id,
+               "langfuse_tags": ["horragor", "rag", "production"],
+           },
+       }
+
+       # On n'ajoute la clé `callbacks` que si le handler existe, afin de
+       # ne jamais passer [None] à LangGraph (qui lèverait une erreur).
+       if langfuse_handler is not None:
+           graph_config["callbacks"] = [langfuse_handler]
+       ```
+
+       Puis, dans l'invocation juste en dessous, remplace config par graph_config :
+       ```
+           try:
+               final_state: AgentState = await asyncio.to_thread(
+                   _compiled_graph.invoke,
+                   initial_state,
+                   graph_config,   # ← anciennement `config`
+               )
+       ```
+       Pourquoi renommer config en graph_config ? Parce que ton module importe déjà from src import config (indirectement, via src.api.auth). Une variable locale nommée config masque le module et rend le code ambigu. Ce renommage est une bonne pratique de lisibilité.
+
+3) Modifier "src/config.py"
+
+    Dans le bloc langfuse rajouter :
+    ```
+    # Le SDK cherche LANGFUSE_HOST dans os.environ. On réinjecte la valeur
+    # résolue (avec son défaut) pour couvrir le cas où la variable n'était
+    # pas définie du tout dans l'environnement.
+    os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST
+    ###
+    ```
+
+4) Tests:
+   - verifier que le paquet langfuse est bien dans mes dépendances :  ` docker exec horragor-ia python -c "import langfuse; print(langfuse.__version__)" `
+   - rebuild : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+   - apres le rebuild : ` docker logs horragor-ia --tail 50 `
+   - test :
+        ```
+        REM 4. Obtenir un token JWT
+        curl -k -X POST https://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"TON_USER\",\"password\":\"TON_PASS\"}"
+        ```
+        Note pour avoir le username et password ce sont ceux que j'ai définis en Phase 7.2 (=> admin et motdepasse123 )
+        Si oublie faire : ` docker exec horragor-ia printenv | findstr AUTH `
+
+        ```
+        REM 5. Envoyer un message (remplace <TOKEN>)
+        curl -k -X POST https://localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer <TOKEN>" -d "{\"message\":\"Parle-moi de The Exorcist\"}"
+        ```
+        Puis ouvre http://localhost:3000 → menu Tracing → tu dois voir une trace horragor-chat, dépliable nœud par nœud.
+
+## 8.2 Loguru ##
+Instrumenter de bout en bout la journalisation structurée sur les 3 couches du projet (Données, Intelligence, Présentation) afin d'assurer une traçabilité complète des requêtes, décisions, appels d'outils et erreurs en temps réel.
+
+Les 3 points clés de l'énoncé à couvrir:
+
+| Point | Où | Quoi |
+|---|---|---|
+| **Requêtes reçues** | `src/main.py` | Logger chaque requête HTTP entrante (user, query, timestamp) |
+| **Décision du routeur** | `src/graph/router.py` | Logger quel chemin est choisi (RAG seul, Scraper seul, RAG+Scraper, LLM pur) |
+| **Appels d'outils** | `src/graph/nodes.py` | Logger chaque nœud du graphe (RAG, Scraper, Narration) : entrée, sortie, erreur |
+
+Architecture de la Solution :
+
+| Principe | Implémentation |
+|---|---|
+| **Centralisation** | Un module `logging_config.py` par service (3 au total : src/, data_api/, app_frontend.py) configurant Loguru **une seule fois** au démarrage |
+| **Structuration** | Logs en JSON pour traçabilité (fichiers rotatifs dans `./logs/`) |
+| **Contexte** | Utilisation de `logger.contextualize(request_id=...)` pour **corréler les logs d'une même requête** à travers plusieurs fonctions/fichiers |
+| **Niveaux** | `DEBUG` (développement local), `INFO` (production) — paramétrable via `config.py` |
+| **Persistance** | Logs rotatifs (50 MB par fichier, max 5 fichiers) écrits dans `./logs/` |
+
+Structuration du code :
+```
+src/observability/
+├── __init__.py
+├── langfuse_client.py         ← tracing (agent Langfuse)
+└── logging_config.py          ← logging (infrastructure)  [NOUVEAU]
+
+data_api/observability/
+├── __init__.py
+└── logging_config.py          ← idem (copie conforme)  [NOUVEAU]
+
+app_frontend.py
+└── Au démarrage : from observability.logging_config import setup_logging; setup_logging()  [NOUVEAU]
+```
+
+Flux de Données d'une Requête (avec Loguru):
+```
+┌──────────────────────────────────┐
+│  COUCHE 3 : PRÉSENTATION         │
+│  (app_frontend.py / Streamlit)   │
+└────────────┬──────────────────────┘
+             │
+             ├─ logger.info("👤 User login")
+             │  (logs frontend)
+             │
+             ▼
+┌──────────────────────────────────────────────────┐
+│  COUCHE 2 : DONNÉES                              │
+│  (data_api/main.py :: /auth/login endpoint)      │
+│  ┌──────────────────────────────────────────────┐│
+│  │ logger.info("🔐 Tentative login")   [LOG A1] ││
+│  │ → data_api/database.py                       ││
+│  │   logger.info("🗄️ SELECT user WHERE...")  ││
+│  │ logger.info("✅ Login OK")           [LOG A2] ││
+│  └──────────────────────────────────────────────┘│
+└────────────┬──────────────────────────────────────┘
+             │
+             ├─ Token JWT retourné au Frontend
+             │
+             ▼
+┌─────────────────────────────────────────────────────────┐
+│  COUCHE 3 : PRÉSENTATION                                │
+│  (app_frontend.py :: POST /chat avec token)             │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │ logger.info("💬 User envoie question")    [LOG B1]  ││
+│  │ request_id = uuid.uuid4()                           ││
+│  │ with logger.contextualize(request_id=...) : ││
+│  └─────────────────────────────────────────────────────┘│
+└────────────┬─────────────────────────────────────────────┘
+             │
+             ▼ (HTTP POST /chat)
+┌─────────────────────────────────────────────────────────┐
+│  COUCHE 1 : INTELLIGENCE                                │
+│  (src/main.py :: /chat endpoint)                        │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │ logger.info("📨 Requête reçue")          [LOG #1]   ││
+│  │   request_id="abc-123"                              ││
+│  │   query="films horreur"                             ││
+│  │   user_id="alice"                                   ││
+│  │ ↳ request_id attaché à TOUS les logs qui suivent   ││
+│  └─────────────────────────────────────────────────────┘│
+└────────────┬─────────────────────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────────────────────┐
+│  src/graph/router.py :: route_request()                 │
+│  ┌─────────────────────────────────────────────────────┐│
+│  │ logger.debug("🚦 Routeur décide: RAG+Web") [LOG #2] ││
+│  │ return "rag_scraper_branch"                         ││
+│  └─────────────────────────────────────────────────────┘│
+└────────────┬─────────────────────────────────────────────┘
+             │
+    ┌────────┴────────┐
+    ▼                 ▼
+┌──────────────────┐  ┌─────────────────────┐
+│ RAG Node         │  │ Scraper Node        │
+│ (src/graph/      │  │ (src/graph/         │
+│  nodes.py)       │  │  nodes.py)          │
+│ ┌────────────────┐│  │ ┌─────────────────┐ │
+│ │logger.info(    ││  │ │logger.info(     │ │
+│ │"🔍 RAG search" ││  │ │"🌐 Scraper Web" │ │
+│ │)      [LOG #3] ││  │ │)      [LOG #3b] │ │
+│ └────────────────┘│  │ └─────────────────┘ │
+│                  │  │                     │
+│ → src/tools/     │  │ → src/tools/        │
+│   rag_tool.py    │  │   scraper_tool.py   │
+│                  │  │                     │
+│ logger.info(     │  │ logger.info(        │
+│ "📊 FAISS: "     │  │ "📡 Wikipedia API:  │
+│ )                │  │ ")                  │
+│                  │  │                     │
+│ logger.info(     │  │ logger.info(        │
+│ "✅ 5 docs",     │  │ "✅ 2 pages",       │
+│  scores=...      │  │  urls=...           │
+│ )                │  │ )                   │
+└────────┬─────────┘  └────────┬────────────┘
+         │                     │
+         └──────────┬──────────┘
+                    ▼
+        ┌─────────────────────────────┐
+        │ Narration Node              │
+        │ (src/graph/nodes.py)        │
+        │ ┌───────────────────────────┐│
+        │ │logger.info(               ││
+        │ │"✍️ LLM Narration") [LOG #4]││
+        │ │                           ││
+        │ │ → src/observability/      ││
+        │ │   langfuse_client.py      ││
+        │ │   (trace agent)           ││
+        │ │                           ││
+        │ │logger.info(               ││
+        │ │"✅ Narration OK",         ││
+        │ │char_count=...,            ││
+        │ │tokens_used=...            ││
+        │ │)                          ││
+        │ └───────────────────────────┘│
+        └────────────┬─────────────────┘
+                     │
+                     ▼
+┌──────────────────────────────────────────────────────────┐
+│  src/main.py :: retour réponse                           │
+│  ┌──────────────────────────────────────────────────────┐│
+│  │ logger.info("✅ Réponse envoyée",  [LOG #5]          ││
+│  │             elapsed_ms=1636)                         ││
+│  │ return ChatResponse(...)                             ││
+│  └──────────────────────────────────────────────────────┘│
+└────────────┬──────────────────────────────────────────────┘
+             │
+             ▼ (HTTP response 200)
+┌──────────────────────────────────────────────────────────┐
+│  COUCHE 3 : PRÉSENTATION                                 │
+│  (app_frontend.py :: affiche réponse)                    │
+│  ┌──────────────────────────────────────────────────────┐│
+│  │ logger.info("✅ Réponse affichée", [LOG B2]          ││
+│  │             elapsed_frontend_ms=42)                  ││
+│  └──────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────┘
+
+   ═══════════════════════════════════════════════════════════════════════════
+   ./logs/intelligence_api.log.json
+   ═══════════════════════════════════════════════════════════════════════════
+   {"time":"2026-07-31T18:20:12.345Z","level":"INFO",
+    "service":"intelligence","message":"📨 Requête reçue",
+    "request_id":"abc-123","query":"films horreur","user_id":"alice"}
+
+   {"time":"2026-07-31T18:20:12.356Z","level":"DEBUG",
+    "service":"intelligence","message":"🚦 Routeur: RAG+Web",
+    "request_id":"abc-123"}
+
+   {"time":"2026-07-31T18:20:12.401Z","level":"INFO",
+    "service":"intelligence","message":"🔍 RAG search",
+    "request_id":"abc-123","query":"films horreur","top_k":5}
+
+   {"time":"2026-07-31T18:20:12.523Z","level":"INFO",
+    "service":"intelligence","message":"✅ RAG: 5 docs",
+    "request_id":"abc-123","scores":[0.89,0.87,0.82,0.78,0.75]}
+
+   {"time":"2026-07-31T18:20:12.525Z","level":"INFO",
+    "service":"intelligence","message":"🌐 Scraper Web",
+    "request_id":"abc-123"}
+
+   {"time":"2026-07-31T18:20:13.001Z","level":"INFO",
+    "service":"intelligence","message":"✅ Scraper: 2 pages",
+    "request_id":"abc-123","titles":["The Shining","Hereditary"]}
+
+   {"time":"2026-07-31T18:20:13.105Z","level":"INFO",
+    "service":"intelligence","message":"✍️ LLM Narration",
+    "request_id":"abc-123"}
+
+   {"time":"2026-07-31T18:20:13.980Z","level":"INFO",
+    "service":"intelligence","message":"✅ Narration OK",
+    "request_id":"abc-123","char_count":1240,"tokens_used":234}
+
+   {"time":"2026-07-31T18:20:13.981Z","level":"INFO",
+    "service":"intelligence","message":"✅ Réponse envoyée",
+    "request_id":"abc-123","elapsed_ms":1636}
+   ═══════════════════════════════════════════════════════════════════════════
+
+   ═══════════════════════════════════════════════════════════════════════════
+   ./logs/data_api.log.json
+   ═══════════════════════════════════════════════════════════════════════════
+   {"time":"2026-07-31T18:20:12.320Z","level":"INFO",
+    "service":"data","message":"🔐 Tentative login",
+    "user_id":"alice","endpoint":"/auth/login"}
+
+   {"time":"2026-07-31T18:20:12.325Z","level":"DEBUG",
+    "service":"data","message":"🗄️ SELECT user",
+    "query":"WHERE username='alice'","elapsed_ms":5}
+
+   {"time":"2026-07-31T18:20:12.330Z","level":"INFO",
+    "service":"data","message":"✅ Login OK",
+    "user_id":"alice","token_expires_in_s":3600}
+   ═══════════════════════════════════════════════════════════════════════════
+
+   ═══════════════════════════════════════════════════════════════════════════
+   ./logs/frontend.log.json
+   ═══════════════════════════════════════════════════════════════════════════
+   {"time":"2026-07-31T18:20:12.300Z","level":"INFO",
+    "service":"frontend","message":"👤 User login",
+    "user_id":"alice","endpoint":"http://localhost:8001/auth/login"}
+
+   {"time":"2026-07-31T18:20:12.340Z","level":"INFO",
+    "service":"frontend","message":"💬 User envoie question",
+    "request_id":"abc-123","query":"films horreur"}
+
+   {"time":"2026-07-31T18:20:13.985Z","level":"INFO",
+    "service":"frontend","message":"✅ Réponse affichée",
+    "request_id":"abc-123","elapsed_frontend_ms":42}
+   ═══════════════════════════════════════════════════════════════════════════
+   ↳ 3 fichiers logs, parsables par Prometheus/Grafana/Uptime Kuma
+```
+Plan Détaillé COMPLET — Les 3 Couches
+1) Couche 1 : Intelligence (src/)
+   - Priorité 1 — Fondations
+  
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 1 | `src/config.py` | **[MODIFIER]** Ajouter `LOG_LEVEL`, `LOG_DIR`, `LOG_JSON`, `LOG_FILE_MAX_BYTES`, `LOG_FILE_BACKUP_COUNT` | Source unique de configuration Loguru |
+        | 2 | `pyproject.toml` | **[VÉRIFIER/AJOUTER]** Dépendance `loguru>=0.7.0` | Loguru doit être installé |
+        | 3 | `src/observability/logging_config.py` | **[CRÉER]** Module d'initialisation (fonction `setup_logging()`) | Exécuté une seule fois au démarrage |
+        | 4 | `src/main.py` | **[MODIFIER]** Appel `setup_logging()` en premier, logs requêtes reçues/réponses | Point d'entrée : chaque requête HTTP loggée |
+        | 5 | `src/graph/router.py` | **[MODIFIER]** Logs de la décision du routeur | **Point clé énoncé** : tracer quel chemin est choisi |
+        | 6 | `src/graph/nodes.py` | **[MODIFIER]** Logs in/out des 3 nœuds (RAG, Scraper, Narration) | **Point clé énoncé** : appels d'outils loggés |
+
+   - Priorité 2 — Cohérence de la chaîne
+
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 7 | `src/tools/rag_tool.py` | **[MODIFIER]** Logs internes : nb docs, scores, fallback | Visibilité sur le comportement du RAG |
+        | 8 | `src/tools/scraper_tool.py` | **[MODIFIER]** Logs internes : URL appelée, succès/échec réseau | Visibilité sur le Scraper |
+        | 9 | `src/api/auth.py` | **[MODIFIER]** Logs des tentatives login (réussi et échoué) | Sécurité : tracer les authentifications |
+
+   - Priorité 3 — Infrastructure (src)
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 10 | `src/graph/pipeline.py` | **[MODIFIER]** Logs de compilation du graphe | Diagnostic au boot |
+        | 11 | `src/observability/langfuse_client.py` | **[MODIFIER]** Remplacer `print()` par `logger` | Cohérence observabilité |
+
+2) Couche 2 : Données (data_api/)
+   - Priorité 1 — Fondations
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 12 | `data_api/config.py` | **[CRÉER OU VÉRIFIER]** Ajouter `LOG_LEVEL`, `LOG_DIR`, `LOG_JSON`, etc. | Même configuration que src/ |
+        | 13 | `data_api/observability/logging_config.py` | **[CRÉER]** Copie conforme de `src/observability/logging_config.py` | Exécuté au démarrage de `data_api/main.py` |
+        | 14 | `data_api/main.py` | **[MODIFIER]** Appel `setup_logging()` en premier | Point d'entrée data_api : requêtes HTTP loggées |
+
+   - Priorité 2 — Chaîne
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 15 | `data_api/database.py` | **[MODIFIER]** Logs des opérations DB (SELECT, INSERT, UPDATE, DELETE) | Traçabilité complète des données |
+        | 16 | `data_api/api/auth.py` (si existe) | **[MODIFIER]** Logs des authentifications data_api | Cohérence sécurité |
+
+3) Couche 3 : Présentation (app_frontend.py)
+   - Priorité 1 — Fondations
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 17 | `observability/logging_config.py` (frontend) | **[CRÉER]** Copie conforme de `src/observability/logging_config.py` | Streamlit loggé structurément |
+        | 18 | `app_frontend.py` | **[MODIFIER]** Appel `setup_logging()` au démarrage, logs des interactions utilisateur | Point d'entrée Streamlit : événements loggés |
+
+   - Priorité 2 — Chaîne
+        | # | Fichier | Action | Raison |
+        |---|---|---|---|
+        | 19 | `app_frontend.py` (auth section) | **[MODIFIER]** Logs des appels `/auth/login` et `/auth/refresh` | Tracer les sessions utilisateur |
+        | 20 | `app_frontend.py` (chat section) | **[MODIFIER]** Logs des appels `/chat` et temps de réponse | Tracer les interactions |
+
+4) Infrastructure & Docker (Tous les services)
+
+    | # | Fichier | Action | Raison |
+    |---|---|---|---|
+    | 21 | `docker-compose.dev.yml` | **[MODIFIER]** Ajouter volumes `./logs:/app/logs` pour **chaque service** | Persistance logs Intelligence + Données + Frontend |
+    | 22 | `.gitignore` | **[MODIFIER]** Ajouter `logs/` | Ne pas commiter les fichiers log |
+
+
+Ordre de transmission suggéré:  
+
+1) Fondations (Intelligence) : pyproject.toml + src/config.py
+→ creation de src/observability/logging_config.py
+2) Point d'entrée (Intelligence): src/main.py
+3) Cœur de l'énoncé (Intelligence): src/graph/router.py + src/graph/nodes.py
+4) Chaîne Intelligence : src/tools/rag_tool.py + src/tools/scraper_tool.py + src/api/auth.py + src/graph/pipeline.py + src/observability/langfuse_client.py
+5) Fondations (Données) : data_api/config.py + data_api/main.py
+→ creation de data_api/observability/logging_config.py
+6) Chaîne (Données) : data_api/database.py
+7) Fondations (Frontend) : app_frontend.py (sections auth + chat)
+→ creation de  observability/logging_config.py (frontend)
+8) Infrastructure : docker-compose.dev.yml + .gitignore
+
+Résumé : Les 3 Couches Couvertes
+| Couche | Point d'Entrée | Router/Décision | Appels d'Outils | Persistence |
+|---|---|---|---|---|
+| **Intelligence** (`src/`) | `src/main.py` ✅ | `src/graph/router.py` ✅ | `src/graph/nodes.py` + outils ✅ | `./logs/intelligence_api.log.json` ✅ |
+| **Données** (`data_api/`) | `data_api/main.py` ✅ | N/A (pas de routeur) | `data_api/database.py` ✅ | `./logs/data_api.log.json` ✅ |
+| **Présentation** (`app_frontend.py`) | `app_frontend.py` ✅ | N/A (pas de routeur) | Appels `/chat` + `/auth` ✅ | `./logs/frontend.log.json` ✅ |
+
+----------------
+
+1) actions point 1:
+    - MODIFICATION 1 : src/config.py
+    - CRÉATION : 
+       - src/observability/logging_config.py
+       - src/observability/json_serializer.py => pour ameliiorer la presentation du json
+    - Variables d'environnement à ajouter au .env (optionnel, defaults OK) (idem pour le .env.example et .env.docker)
+
+
+2) actions point 2 :  
+    On va maintenant modifier src/main.py pour intégrer le logging structuré au point d'entrée de l'application Intelligence.
+    - Importer setup_logging() de src/observability/logging_config.py
+    - Appeler setup_logging() en tout premier (avant FastAPI)
+    - Remplacer les print() par des logs structurés
+    - Ajouter un middleware de requête/réponse avec request_id automatique
+    - Logger les requêtes HTTP, réponses et erreurs
+
+    On obtient maintenant :
+    - Traçabilité complète : chaque requête HTTP a un request_id unique
+    - Logs structurés : points clés avec tags [lifespan], [chat_endpoint], etc.
+    - Gestion des erreurs : 401, 503, 500 sont loggées correctement
+    - Temps de réponse : chaque requête note son elapsed_time
+    - X-Request-ID dans les headers : utile pour tracker côté frontend
+
+    Tests :
+    - rebuild : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - Test A — le démarrage : ` docker logs horragor-ia --tail 40 `
+    - Test B — le middleware et le X-Request-ID : `curl -ki https://localhost:8000/health `  
+        ✅ Attendu : HTTP/1.1 200 OK + un header x-request-id: <uuid>.  
+        Note l'UUID, puis : ` docker logs horragor-ia --tail 20 `  
+        ✅ Attendu : → Requête entrante : GET /health, la ligne debug du health check, et ← Réponse : 200 (x.xx ms) — les trois portant le même request_id. C'est ça qui prouve que la traçabilité fonctionne.
+    - Test C — non-régression /chat authentifié  
+        Récupère un token (adapte le mot de passe) : `  curl -k -s -X POST https://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"TON_MDP\"}"`
+        Puis, avec le token : `curl -ki -X POST https://localhost:8000/chat -H "Authorization: Bearer TON_TOKEN" -H "Content-Type: application/json" -d "{\"message\":\"Parle-moi de The Exorcist\"}" `  
+        ✅ Attendu : 200 + JSON complet (response, sources, used_web, thread_id).  Dans les logs, la chaîne complète avec le même request_id : requête entrante → ✅ Utilisateur authentifié : admin → Sources FAISS extraites : N → ← Réponse : 200.
+
+3) actions point 3 : modifications =>  
+    nodes.py :  
+        - Import from loguru import logger  
+        - Logs structurés dans rag_node :  
+          - logger.info() pour les étapes principales (début, vectoriel, structuré, résumé)  
+          - logger.debug() pour les détails (normalisation, fallback, métadonnées)  
+        - Logs dans scraper_node (priorités, appels web)
+        - Logs dans narration_node (corpus, outils, LLM invocation, succès/erreur)  
+        - Docstrings enrichies, commentaires français préservés
+
+    router.py
+      - Import from loguru import logger
+      - Logs dans helpers (_extract_best_faiss_score, _structured_has_matches, _faiss_is_relevant)
+      - Logs détaillés dans route_after_rag() :
+       - logger.warning() pour décisions négatives (aucun signal)
+       - logger.info() pour décisions positives (avec contexte détaillé)
+      - Docstrings enrichies en français
+      - Suppression du logger = logging.getLogger(__name__) (remplacé par Loguru)
+  
+    Tests :  
+       - verifier que dans ".env.docker" => ` LOG_LEVEL=DEBUG `
+       - rebuild : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `  
+       - Test :   
+         - ` docker logs -f horragor-ia ` ou ` docker logs -f horragor-ia | findstr /C:"RAG Node" /C:"Router" /C:"Scraper" /C:"Narration" `  
+         - et faire une requete dans interface streamlit
+
+4) actions point 4 : Chaîne Intelligence : 
+- src/tools/rag_tool.py — Logs du comportement vectoriel et structuré
+  
+    | Point | Statut actuel | À ajouter |
+    |-------|--------------|-----------|
+    | Chargement FAISS | ✅ Logs présents | ✅ Logs OK |
+    | Recherche vectorielle | ⚠️ Logs minimalistes | 🔴 **Ajouter : scores des résultats, seuil de pertinence** |
+    | Appels data-api | ⚠️ Pas de logs | 🔴 **Ajouter : URL, statut HTTP, nombre de résultats** |
+    | Erreurs réseau | ⚠️ Minimaliste | 🔴 **Ajouter : timeout, détail d'erreur** |
+    | Fuzzy matching | ⚠️ Minimaliste | 🔴 **Ajouter : score_cutoff, candidats testés** |
+
+    tests :
+    - ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - Syntaxe Python valide => ` python -m py_compile src/tools/rag_tool.py && echo "✅ Syntaxe OK" `
+    - Vérifier les imports => ` python -c "from src.tools.rag_tool import search_local_horror_lore, query_movie_metadata, find_similar_horror_movies, fuzzy_find_film, resolve_film, _load_faiss_resources; print('OK: 6 fonctions importees')" `
+    - Compter les appels logger => ` findstr /C:"logger." src\tools\rag_tool.py | find /c /v "" ` ou ` for %L in (info debug warning error success) do @findstr /C:"logger.%L" src\tools\rag_tool.py | find /c /v "" > nul & findstr /C:"logger.%L" src\tools\rag_tool.py | find /c /v "" `
+    - Sections docstring (Parameters / Returns / Raises) => ` findstr /R /C:"Parameters" /C:"Returns" /C:"Raises" src\tools\rag_tool.py | find /c /v ""`
+    - Signatures inchangées => ` python -c "import inspect,src.tools.rag_tool as m;[print(n, inspect.signature(f)) for n,f in vars(m).items() if callable(f) and getattr(f,'__module__','')==m.__name__]" `
+    - Vérification en conditions réelles (Docker) :
+        ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `  
+        Puis, dans un second terminal cmd : ` docker logs -f horragor-ia | findstr /C:"FAISS" /C:"data-api" /C:"Fuzzy" /C:"pgvector" /C:"score" `  
+        Lance ensuite une requête Streamlit avec un titre volontairement mal orthographié (ex. « Shinning » ou « Concjuring ») pour faire apparaître (score_cutoff appliqué + candidat fuzzy retenu, les scores FAISS (min / max / moyen), l'URL data-api appelée + statut HTTP + durée ms)
+    - Aucune exception avalée => ` findstr /C:"except" src\tools\rag_tool.py `
+
+- src/tools/scraper_tool.py — Logs des appels réseau et parsing  
+    les modifications :  
+    | Exigence | Implémentation |
+    |---|---|
+    | URL cible appelée | `urlencode` complet en `debug` avant chaque GET |
+    | Statut HTTP + durée ms | `info` après chaque réponse, avec `perf_counter` |
+    | Taille réponse | octets bruts + nb caractères du fragment HTML |
+    | Éléments extraits | nb sections, nb `<sup>` retirés, nb `<p>`, nb paragraphes conservés, taux de compression |
+    | Page vide / sélecteur KO | `warning` dédié si 0 section, 0 `<p>`, fragment vide, texte vide après nettoyage |
+    | Timeout / RequestError / HTTPError | 3 `except` distincts + `ValueError` JSON, tous en `error` avec durée |
+    | User-agent / config | logué une fois au chargement du module |
+    | Bonus | redirection Wikipédia détectée et tracée, liste des sections disponibles en cas d'échec étape 2 |
+
+    tests :
+    - ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - Syntaxe => ` python -m py_compile src\tools\scraper_tool.py && echo OK Syntaxe `
+    - Imp => orts (5 fonctions) => ` python -c "from src.tools.scraper_tool import _fetch_page_sections, _fetch_section_html, _clean_wiki_html, extract_wikipedia_synopsis, enrich_from_web; print('OK: 5 fonctions importees')" `
+    - Comptage logger (≥ 45 attendu) => ` findstr /C:"logger." src\tools\scraper_tool.py | find /c /v "" `
+    - Instrumentation durée (~20 attendu) => ` findstr /N /C:"perf_counter" src\tools\scraper_tool.py | find /c /v "" `
+    - Gestion d'erreurs (8 attendu : 2×Timeout, 2×HTTPError, 2×RequestException, 2×ValueError) => ` findstr /C:"except requests" /C:"except ValueError" src\tools\scraper_tool.py `
+    - Signatures inchangées => ` python -c "import inspect,src.tools.scraper_tool as m;[print(n, inspect.signature(f)) for n,f in vars(m).items() if callable(f) and getattr(f,'__module__','')==m.__name__]" `
+    - Cas réel : film existant => ` python -c "from src.tools.scraper_tool import enrich_from_web; r=enrich_from_web('Shining'); print('LONGUEUR:', len(r))" `
+    - Cas d'échec : page inexistante => ` python -c "from src.tools.scraper_tool import enrich_from_web; r=enrich_from_web('FilmQuiNexistePasXyz123'); print('VIDE' if not r else 'PROBLEME')" `
+    - Cas limite : article sans section synopsis => ` python -c "from src.tools.scraper_tool import enrich_from_web; enrich_from_web('Python (langage)')" `
+    - Titre vide => ` python -c "from src.tools.scraper_tool import enrich_from_web; print(repr(enrich_from_web('')))" `
+
+- src/api/auth.py — Logs des tentatives d'authentification  
+  Ne jamais logger le mot de passe en clair, seulement le username et le résultat (succès/échec).  
+  Ce qui a changé (aucune signature, aucun comportement HTTP touché) :
+    - import time + from loguru import logger ajoutés
+    - logger.info en entrée de login() et refresh() — jamais le password, jamais le refresh_token complet (seulement 10 premiers caractères en debug)
+    - logger.warning sur chaque branche d'échec utilisateur (username inconnu, mauvais password, refresh invalide), avec la raison précise
+    - logger.error distinct pour l'erreur serveur (hash non configuré) — c'est un problème d'infra, pas une tentative malveillante
+    - logger.success + durée en ms sur les deux succès, sans jamais afficher les tokens générés
+
+    tests : 
+    - ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - ` python -m py_compile src/api/auth.py && echo OK Syntaxe `
+    - test réelles via l'API démarrée (uvicorn ou ton main.py) :
+        ```
+        # Terminal 1 : démarre le serveur
+        uvicorn src.main:app --reload
+
+        # Terminal 2 : tests
+        # Test 1 : mauvais username
+        curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"mauvais_user\",\"password\":\"x\"}"
+
+        # Test 2 : mauvais password (remplace "admin" et "motdepasse123" par tes vraies credentials)
+        curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"mauvais_password\"}"
+
+        # Test 3 : bon login (remplace par tes vraies credentials)
+        curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"motdepasse123\"}"
+
+        # Test 4 : refresh token invalide
+        curl -4 -X POST http://localhost:8000/auth/refresh -H "Content-Type: application/json" -d "{\"refresh_token\":\"token_invalide\"}"
+
+        ```
+
+- src/graph/pipeline.py — Logs de compilation du graphe LangGraph
+    tests : 
+    - verification syntaxique => ` python -c "import ast; ast.parse(open('src/graph/pipeline.py', encoding='utf-8').read()); print('Syntaxe OK')" `
+    - rebuid du conteneur : ` docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build intelligence-api `
+    - les logs de compilation => ` docker logs horragor-ia --tail 40 ` ou ` docker logs horragor-ia 2>&1 | findstr /C:"[Graph]" `
+    - Vérifier que rien n'est cassé :   
+        - dans un Terminal 1 : démarrer le serveur => ` uvicorn src.main:app --reload `
+        - dans un autre terminal :  
+        Le graphe compilé doit toujours fonctionner. Récupère un token puis interroge /chat => ` curl -4 -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"motdepasse123\"}" `
+        Copie l'access_token, puis => ` curl -4 -X POST http://localhost:8000/chat -H "Content-Type: application/json" -H "Authorization: Bearer TON_TOKEN" -d "{\"message\":\"Quels sont les horaires d ouverture ?\"}" `
+
+
+- src/observability/langfuse_client.py — Remplacer print() par logger  
+    langfuse_client.py utilise directement Loguru au lieu du logging standard (pour homogénéiser tout le code avec from loguru import logger partout plutôt que de compter sur une interception implicite).  
+
+5) actions point 5 : Fondations (Données) :
+- data_api/config.py (nouveau)
+Même pattern que src/config.py : chargement du .env racine, PROJECT_ROOT, puis les 5 variables déjà présentes dans .env.example : LOG_LEVEL, LOG_DIR, LOG_JSON, LOG_FILE_MAX_BYTES, LOG_FILE_BACKUP_COUNT, avec création de LOG_DIR. Rien d'autre (pas de duplication de DATABASE_URL etc., hors scope).
+
+- data_api/observability/ (nouveau : __init__.py, logging_config.py)
+Copie auto-suffisante (pas d'import vers src.observability), à cause de la contrainte Docker ci-dessus. Adaptations par rapport à la version src/ :
+  - flatten_loguru_record → "service": "data-api" au lieu de "intelligence".
+  - LOG_FILE_PATH = LOG_DIR / "data_api.log" (fichier distinct, même dossier logs/ partagé).
+  - Liste des loggers stdlib interceptés réduite à uvicorn*, fastapi, starlette (pas httpx/langfuse, absents côté data_api).
+  - Import des constantes depuis data_api.config au lieu de src.config.
+
+    Dans src/observability/logging_config.py, la classe JsonFileSink (utilisée quand LOG_JSON=True, qui est la valeur par défaut dans .env.example) appelle flatten_loguru_record() pour transformer chaque enregistrement Loguru en une ligne JSON à plat. Cette fonction vit dans json_serializer.py — ce n'est pas optionnel, sans elle le sink JSON ne peut pas fonctionner.
+
+    Comme data_api/observability/logging_config.py doit être autonome (pas d'import vers src/), il a besoin de cette même fonction, mais avec "service": "data-api" au lieu de "intelligence".
+
+    j ai choisi d'une  Fonction inlinée directement dans data_api/observability/logging_config.py (pas de fichier séparé) plutot que de creer un autre Fichier séparé data_api/observability/json_serializer.py — symétrique avec src/.
+
+- data_api/main.py (modifié)
+Appel de setup_logging() tout en haut du fichier, avant l'import de data_api.routers.films (qui déclenche l'import de database.py/psycopg2), exactement comme dans src/main.py.
+
+6) actions point 6 : Chaîne (Données)
+
+    Pour l'item 15 (data_api/database.py) — le point délicat : les requêtes SQL (SELECT, futures INSERT/UPDATE/DELETE) sont exécutées dans data_api/routers/films.py via conn.cursor().execute(...), pas dans database.py lui-même, qui ne fait qu'ouvrir/fermer la connexion. Pour respecter la consigne "modifier database.py uniquement" sans toucher films.py, j'ai :
+
+    - Logger le cycle de vie de la connexion dans get_db_connection() : ouverture réussie (debug) et fermeture (debug), en plus du logger.error déjà présent sur OperationalError.
+    - Instrumenter execute() de façon transparente : get_db_connection() retournera une connexion enveloppée dont .cursor(...) produit un curseur enveloppé qui journalise automatiquement, à chaque appel execute() :
+        - l'opération détectée (SELECT/INSERT/UPDATE/DELETE, extrait du premier mot de la requête),
+        - la durée en ms,
+        - le nombre de lignes affectées (rowcount),
+        - les erreurs SQL (logger.error avant de relever l'exception).
+
+        Ce wrapper délègue tout le reste (fetchall, fetchone, cursor_factory=RealDictCursor, etc.) au curseur psycopg2 réel via __getattr__ — donc aucune modification de films.py n'est nécessaire, toutes les requêtes existantes et futures sont tracées automatiquement.
+
+
+7) actions point 7 : Fondations (Frontend) 
+
+- observability/logging_config.py (nouveau, package racine)
+  - Auto-suffisant comme la version data_api, mais importe LOG_LEVEL/LOG_DIR/etc. directement depuis src.config (pas de nouveau config.py frontend créé — il n'apparaît pas dans ta table, et docker/frontend.Dockerfile copie déjà tout src/, contrairement à data_api qui n'en copie qu'un extrait). C'est cohérent avec app_frontend.py qui importe déjà API_BASE_URL/API_TIMEOUT depuis src.config.
+  - service="frontend", fichier logs/frontend.log.
+  - Interception stdlib limitée à streamlit et httpx (pas de fastapi/uvicorn, absents ici).
+
+- app_frontend.py (modifié)
+  - Point d'attention important, propre à Streamlit : le script entier se ré-exécute à chaque interaction (clic, saisie...). Appeler setup_logging() sans garde à chaque rerun re-déclencherait toute l'init Loguru en boucle. Je protège l'appel avec st.cache_resource (le mécanisme Streamlit idiomatique garantissant une exécution unique par process), plutôt qu'un simple flag global fragile.
+  - Remplace le seul print() du fichier (decode_jwt_payload, ligne 74) par logger.error(...), dans la continuité du remplacement print() → logger déjà fait sur langfuse_client.py (item 11).
+  - section auth (login(), refresh_access_token())
+    - login() : logger.info avec username bindé si succès, logger.warning si échec (mauvais identifiants) ou logger.error si erreur inattendue (réseau, TLS...).
+    - refresh_access_token() : logger.info si le refresh réussit, logger.warning s'il échoue.
+  - section chat (call_chat_api())
+    - Mesure du temps de réponse avec time.perf_counter() (nouvel import time).
+    - logger.debug avant l'envoi (longueur de la question, thread_id bindé).
+    - logger.info avec duration_ms à la réception d'une réponse 200 (avant ou après un refresh automatique sur 401).
+    - logger.warning/logger.error sur les cas d'échec : token expiré sans refresh possible, erreur HTTP non-200, ConnectError (backend hors ligne), exception inattendue.
+
+    Toutes ces lignes utilisent logger.bind(thread_id=..., username=...) pour rester corrélables entre elles dans les logs JSON. Je garde les st.error/st.info existants intacts (affichage utilisateur), j'ajoute juste les logs en parallèle.
+
+8) actions point 8 :Infrastructure 
+
+    j'ajoute volumes: 
+    - ./logs:/app/logs aux 3 services (data-api, intelligence-api, frontend) dans docker-compose.dev.yml — confirmé que les 3 services utilisent déjà LOG_DIR=/app/logs via .env.docker, donc le montage rendra directement visibles data_api.log, intelligence_api.log et frontend.log sur mon PC dans ./logs/.
+
+## 8.3 Prometheus + Grafana + Uptime Kuma #
+
+### 1. Instrumentation des 2 API (code) ###
+1. Dépendance (pyproject.toml)  
+Ajouter prometheus-fastapi-instrumentator via uv add prometheus-fastapi-instrumentator (une seule commande, pas de code).
+
+2. data_api/main.py
+   - Import (après les imports existants, ligne 22-25) :  
+        from prometheus_fastapi_instrumentator import Instrumentator
+
+   - Activation (en fin de fichier, après le bloc health_check, ligne 45) :  
+   Instrumentator().instrument(app, excluded_handlers=["/health"]).expose(app)
+
+   - Décisions prisent pour ce fichier :
+     - /health exclu des métriques : Uptime Kuma va le pinguer en boucle, l'exclure évite de polluer le compteur de requêtes/latence sur Grafana avec du bruit de monitoring.
+     - /metrics non protégé par JWT : cohérent avec /health qui n'est déjà pas protégé, et data-api n'a de toute façon aucun port publié vers l'hôte (§ docker-compose.yml) — donc /metrics reste inaccessible depuis ton PC, seul Prometheus (sur le réseau interne) pourra le scraper.
+     - Ça enregistre automatiquement un GET /metrics qui expose : nb requêtes par route/méthode/code, histogramme de latence, requêtes en cours. Aucune métrique à coder à la main.
+
+3. src/main.py
+- Même import, même ligne, ajoutée en fin de fichier (après health_check, ligne ~406) — ainsi elle s'applique une fois toutes les routes (/chat, /health, /auth/...) déjà enregistrées.
+
+### 2. Prometheus ###
+Scrape intelligence-api:8000/metrics et data-api:8001/metrics sur le réseau interne, via un fichier prometheus/prometheus.yml.
+
+Intelligence-api tourne en HTTPS (--ssl-keyfile/--ssl-certfile, Phase 7.3) alors que data-api est en HTTP simple. Ça change la config Prometheus, sinon le scrape de l'API Intelligence échouerait silencieusement
+
+1. prometheus.yml (nouveau fichier, config du scraper)
+
+2. Nouveau service (prometheus) dans docker-compose.yml
+   - Image officielle publique (pas de build:, pas de pull_policy: never — contrairement aux 3 services applicatifs) : Docker doit pouvoir la télécharger.
+   - Port 9090 publié directement → on pourra ouvrir http://localhost:9092 pour voir les targets et faire des requêtes PromQL.
+   - Volume nommé prometheus_data pour persister les données entre docker compose down/up (à déclarer en bas du fichier, section volumes: — nouvelle section à ajouter).
+
+ Tester (docker compose up -d --build + vérifier les targets sur http://localhost:9092/targets),
+
+=> conteneur stable, dashboard accessible sur http://localhost:9092, les 2 API remontent leurs métriques (requêtes, latences, codes de statut), /health exclu du bruit.
+
+### 3. Grafana ###
+Datasource Prometheus + un dashboard minimal (requêtes/sec, latence, erreurs)
+
+1. Fichier de provisioning — grafana/provisioning/datasources/datasource.yml
+
+    C'est Grafana lui-même qui impose ce chemin (/etc/grafana/provisioning/datasources/) pour l'auto-configuration au démarrage. Un seul fichier dedans.
+    Ça évite de configurer la datasource manuellement à chaque docker compose down/up.
+
+2. Dashboard : pas de provisioning par fichier JSON
+Le dashboard (requêtes/sec, latence, erreurs — panels PromQL simples type rate(http_requests_total[1m])) sera creer à la main dans l'UI après le premier
+démarrage. Si l'on préfère un fichier JSON peut etre ajouter juste un fichier dansgrafana/provisioning/dashboards/ qui creer le dashborad et que Grafana chargera automatiquement au démarrage (zéro clic)
+
+3. Nouveau service (grafana) dans docker-compose.yml
+  grafana:
+   - Port hôte 3002 → 3000 interne au conteneur. Pas de conflit avec Langfuse (déjà sur 3000 côté hôte) : les deux 3000 sont internes à des conteneurs différents, seul le mapping hôte compte.
+   - Volume nommé grafana_data à ajouter à la section volumes: existante (avec prometheus_data).
+
+4. Executer ` docker compose up -d ` pour démarrer Grafana.
+    Grafana tourne sur http://localhost:3002, connecté à Prometheus sans configuration manuelle.
+
+5.  création du dashboard manuel dans l'UI  
+    Se connecter avec  (admin/admin)
+    
+    Étape 1 — Créer le dashboard
+    1. Clique sur Dashboards dans le menu de gauche.
+    2. En haut à droite, clique sur New → New dashboard.
+    3. Clique sur Add visualization.
+    4. Une fenêtre te demande la source de données → choisis Prometheus.
+
+    Panel 1 — Requêtes par seconde
+    1. Dans la zone de requête en bas, il y a un sélecteur de mode (souvent deux boutons "Builder" / "Code", parfois une icône </>). Clique sur "Code" pour écrire la requête PromQL directement en texte.
+    2. Colle cette requête :
+    sum(rate(http_requests_total[1m])) by (job)
+    3. Appuie sur Shift+Enter (ou clique ailleurs) pour exécuter — le graphique en haut doit se remplir avec 2 courbes (une par job : data-api et intelligence-api).
+    4. À droite, dans "Panel options", remplis le champ Title avec : Requêtes par seconde
+
+    Panel 1 terminé. Maintenant :
+    1. En haut à droite de l'éditeur de panel, clique sur "Apply" (ou l'icône ✓ / coche) pour valider ce panel et revenir au dashboard.
+    2. Tu devrais voir ton dashboard avec le premier graphique "Requêtes par seconde" affiché.
+    3. Cherche un bouton "+ Add" (en haut du dashboard) → choisis "Visualization" pour créer le 2ᵉ panel (latence).
+
+    Panel 2 — Latence (p95)
+    1. Passe en mode Code (comme précédemment).
+    2. Colle cette requête :
+    histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job))
+    2. Ça calcule le 95ᵉ centile de latence par API : 95 % des requêtes répondent en dessous de cette valeur.
+    3. Garde le type de visualisation Time series.
+    4. Dans Panel options (à droite), mets le titre : Latence p95 (secondes)
+    5. Clique sur Apply.
+
+    Panel  3ᵉ et dernier panel.
+
+    1. Clique à nouveau sur "+ Add" → "Visualization".
+    2. Mode Code, requête :
+    sum(rate(http_requests_total{status=~"5.."}[1m])) by (job)
+    2. Ça compte le taux d'erreurs serveur (5xx) par seconde, par API. Si tout va bien, la courbe sera à zéro (pas d'erreur) — c'est normal et attendu.
+    3. Type de visualisation : Time series.
+    4. Titre : Erreurs 5xx / sec
+    5. Apply.
+
+    Sauvegarde du dashboard
+    1. En haut à droite du dashboard, clique sur l'icône disquette (💾) ou le bouton "Save dashboard".
+    2. Une fenêtre demande un titre → mets par exemple : HorRAGor - Vue d'ensemble
+    3. Clique sur Save.
+
+### 4. Uptime Kuma ###
+Surveille les 3 GET /health (déjà présents depuis la Phase 4.3, y compris _stcore/health pour Streamlit) — se configure surtout via son UI après démarrage, peu de fichiers à écrire.
+
+1. Ajouter le service dans docker-compose.yml :
+   - ajout de uptime_kuma_data: dans la section volumes: en bas du fichier.
+   Points à noter :
+   - Image officielle publique (comme Prometheus/Grafana), pas de build.
+   - Port 3003 publié vers l'hôte → UI accessible sur http://localhost:3003.
+   - Doit être sur horragor-net pour joindre data-api:8001 et int pas de port publié vers l'hôte — Uptime Kuma doit passer parle réseau interne.
+
+2. Configuration via l'UI (pas de fichier, pas de provisioning) :
+    Après docker compose up -d :
+    1. Première visite → création du compte admin (admin / admin974).
+    2. Créer 3 monitors type HTTP(s) :
+    - Data API → http://data-api:8001/health
+    - Intelligence API → https://intelligence-api:8000/health — cocher "Ignore TLS/SSL error" (certificat auto-signé, Phase 7.3)
+    - Frontend Streamlit → http://frontend:8501/_stcore/health
+    - Intervalle : 60s
+
+    Etape 1 :
+    1. Dans le menu de gauche, cliquer sur le bouton "Ajouter une nouvelle sonde" (en haut).
+    2. Renseigne les champs :
+       - Monitor Type : HTTP(s)
+       - Friendly Name : Data API
+       - URL : http://data-api:8001/health
+       - Heartbeat Interval : 60 (secondes) — laisse le reste par défaut (Retries, etc.)
+    3. Descends jusqu'à Accepted Status Codes : laisse 200-299 (par défaut).
+    4. Clique sur Save (le statut passe au vert ("Up" / "Actif"))
+
+    Etape 2, pour Intelligence API, ajoute une nouvelle sonde avec :
+      - Type de sonde : HTTP(s)
+      - Nom : Intelligence API
+      - URL : https://intelligence-api:8000/health
+      - Intervalle : 60 secondes
+      - Important : coche l'option "Ignorer les erreurs TLS/SSL" (ou "Ignore TLS/SSL error") — sinon le monitor va échouer à cause du certificat auto-signé de la Phase 7.3.
+  
+   Etape 3, le Frontend Streamlit :
+      - Type de sonde : HTTP(s)
+      - Nom : Frontend Streamlit
+      - URL : http://frontend:8501/_stcore/health
+      - Intervalle : 60 secondes
+      - Codes de statut acceptés : 200-299 (par défaut)
+      - Pas besoin d'ignorer TLS ici (HTTP simple, pas de certificat).

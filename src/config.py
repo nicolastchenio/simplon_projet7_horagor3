@@ -45,6 +45,30 @@ OLLAMA_EMBEDDING_MODEL: str = os.getenv(
 )
 
 # ═══════════════════════════════════════════════════════════════
+# Observabilité Langfuse (Phase 8)
+# ═══════════════════════════════════════════════════════════════
+# Langfuse trace chaque exécution du graphe : durée par nœud,
+# prompts envoyés, réponses reçues, tokens consommés, erreurs.
+#
+# Le SDK Langfuse lit ses credentials directement dans os.environ.
+# Comme python-dotenv les a déjà chargées ci-dessus (load_dotenv),
+# aucune propagation manuelle n'est nécessaire — sauf pour le HOST,
+# dont on veut garantir la valeur par défaut Docker.
+# ═══════════════════════════════════════════════════════════════
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+
+# L'observabilité n'est active que si les DEUX clés sont fournies.
+# Cela évite les erreurs 401 en boucle si l'une manque.
+LANGFUSE_ENABLED: bool = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
+
+# Le SDK cherche LANGFUSE_HOST dans os.environ. On réinjecte la valeur
+# résolue (avec son défaut) pour couvrir le cas où la variable n'était
+# pas définie du tout dans l'environnement.
+os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST
+
+# ═══════════════════════════════════════════════════════════════
 # Base de données PostgreSQL / Supabase
 # ═══════════════════════════════════════════════════════════════
 DATABASE_URL: str = os.getenv(
@@ -61,6 +85,37 @@ API_TIMEOUT: int = int(os.getenv("API_TIMEOUT", "30"))
 
 # URL complète exposée au frontend (générée automatiquement par défaut)
 API_BASE_URL: str = os.getenv("API_BASE_URL", f"http://localhost:{API_PORT}")
+
+# ═══════════════════════════════════════════════════════════════
+# Loguru — Journalisation structurée (Phase 8.2)
+# ═══════════════════════════════════════════════════════════════
+# Centralisation de la configuration Loguru pour instrumenter
+# de bout en bout la traçabilité des requêtes, décisions et
+# appels d'outils à travers les 3 couches (Données, Intelligence,
+# Présentation).
+#
+# Les logs sont écrits en JSON pour parsing par les stacks de
+# monitoring (Prometheus/Grafana/Uptime Kuma/Langfuse).
+# ═══════════════════════════════════════════════════════════════
+
+# Niveau de log : DEBUG (dev local), INFO (prod)
+LOG_LEVEL: str = os.getenv("LOG_LEVEL", "DEBUG")
+
+# Répertoire de persistance des fichiers logs
+LOG_DIR: Path = Path(os.getenv("LOG_DIR", PROJECT_ROOT / "logs"))
+
+# Format des logs : JSON (structuré) ou texte (lisible)
+# JSON est requis pour Prometheus/Grafana/Uptime Kuma
+LOG_JSON: bool = os.getenv("LOG_JSON", "true").lower() in ("true", "1", "yes")
+
+# Rotation des fichiers logs : taille max avant création d'un nouveau
+LOG_FILE_MAX_BYTES: int = int(os.getenv("LOG_FILE_MAX_BYTES", "52428800"))  # 50 MB
+
+# Nombre max de fichiers logs à conserver avant suppression des anciens
+LOG_FILE_BACKUP_COUNT: int = int(os.getenv("LOG_FILE_BACKUP_COUNT", "5"))
+
+# Créer le répertoire logs s'il n'existe pas
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ═══════════════════════════════════════════════════════════════
 # Outils externes (Scraper, etc.)

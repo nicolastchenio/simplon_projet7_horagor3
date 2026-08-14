@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "data-api"
+    static_configs:
+      - targets: ["data-api:8001"]
+    metrics_path: /metrics
+
+  - job_name: "intelligence-api"
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    static_configs:
+      - targets: ["intelligence-api:8000"]
+    metrics_path: /metrics
