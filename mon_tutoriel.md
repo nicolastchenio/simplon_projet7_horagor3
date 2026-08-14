@@ -3859,8 +3859,10 @@ Ajout du badge du taux de coverage :
             git config user.name "github-actions"
             git config user.email "github-actions@github.com"
             git add coverage.svg
-            git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
-            git diff --staged --quiet || git push
+            if ! git diff --staged --quiet; then
+                git commit -m "chore: update coverage badge [skip ci]"
+                git push origin HEAD:main
+            fi
     ```
 - coverage.xml n'est pas dans .gitignore (c'est un fichier généré, comme .coverage/htmlcov/) — je l'ajoute pour éviter qu'il soit commité par erreur en local.
 - Ajout du badge de couverture dans le README.md (avec la bonne URL de repo cette fois).
