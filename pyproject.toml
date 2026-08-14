@@ -36,3 +36,7 @@ dev = [
     "sphinx-rtd-theme>=3.1.0",
     "sphinxcontrib-mermaid>=2.1.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

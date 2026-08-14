@@ -3547,9 +3547,9 @@ Surveille les 3 GET /health (déjà présents depuis la Phase 4.3, y compris _st
       - Pas besoin d'ignorer TLS ici (HTTP simple, pas de certificat).
 
 
-## Phase 9 : Documentation Sphinx ##
+# Phase 9 : Documentation Sphinx #
 
-### 9.1 Setup Sphinx ###
+## 9.1 Setup Sphinx ##
 
 Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`).  
    - Installe le thème RTD et le support Markdown :
@@ -3571,7 +3571,7 @@ Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`).
       - changer html_theme = "alabaster" → "sphinx_rtd_theme"
       - configurer sys.path.insert(0, ...) vers la racine du projet pour qu'autodoc trouve src et data_api
 
-### 9.2 Contenu obligatoire ###
+## 9.2 Contenu obligatoire ##
 
 1. **Doc API automatisée** : pour les **deux** API (Données + Intelligence), via `autodoc` (`automodule::` sur `src.main`, `src.api.auth`, `data_api.main`, `data_api.routers.films`, etc.), on s'appuie sur les docstrings déjà rédigées en français dans le code.  
    La doc HTML est dans docs/build/html/index.html.
@@ -3594,10 +3594,97 @@ Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`).
 
 3. **Cartographie du graphe** : génère un schéma des nodes, du router et des edges conditionnelles via `graph.get_graph().draw_mermaid()` (texte Mermaid intégré nativement dans une page Sphinx, sans dépendance réseau ni Graphviz).
 
-
-### 9.3 Build ###
+## 9.3 Build ##
 
 Génère la documentation HTML finale (`uv run sphinx-build -b html docs/source docs/build/html`).
+
+# Phase 10 : Qualité, Tests & Gouvernance #
+
+## 10.5 GitHub Issues ##
+
+Crée un template d'issue dans `.github/ISSUE_TEMPLATE/bug_report.md` avec les champs : nœud concerné (RAG / Scraper / Narration), requête test, résultat attendu, résultat obtenu, logs Langfuse si applicable. Adopte la règle : chaque anomalie détectée = un ticket archivé avant correction.
+
+C'est un fichier Markdown avec un en-tête YAML, placé dans .github/ISSUE_TEMPLATE/, que GitHub reconnaît automatiquement. Quand quelqu'un clique sur "New Issue" sur le repo, au lieu d'une zone de texte vide, GitHub propose ce template pré-rempli avec les sections qu'on a définies — ça force à structurer le rapport de bug au lieu de laisser chacun écrire "ça marche pas" sans contexte.
+
+Structure technique :
+```
+---
+name: Bug Report
+about: Signaler une anomalie sur un agent HorRAGor
+title: "[BUG] "
+labels: bug
+---
+```
+
+Sections en Markdown normal...  
+Le bloc YAML (name, about, title, labels) configure comment ce template apparaît dans le menu "New Issue". Le reste est du Markdown classique, affiché tel quel dans le corps de l'issue à remplir.
+
+## 10.1 Tests unitaires ##
+- Teste chaque node indépendamment (mock des outils).
+- Teste le router avec des states variés (résultats riches vs résultats vides).
+- Teste les endpoints de `data_api` avec la BDD mockée.
+
+Structure proposée:
+
+```
+tests/
+├── conftest.py              # fixtures partagées (faux curseur/connexion PostgreSQL)
+├── test_router.py           # route_after_rag — pur, aucun mock
+├── test_nodes.py            # rag_node, scraper_node, narration_node — mocks
+├── test_horror_tools.py     # calculate_movie_age, horror_survival_simulator — purs
+├── test_security.py         # bcrypt/JWT (src/auth/security.py) — purs
+├── test_auth_endpoints.py   # /auth/login, /auth/refresh (TestClient, app minimale)
+└── test_data_api_films.py   # /films/search, /fuzzy, /{id}, /{id}/similar (TestClient + DB mockée)
+```
+
+Un petit ajout dans pyproject.toml ([tool.pytest.ini_options], pythonpath = ["."]) pour que pytest trouve src et data_api depuis n'importe quel répertoire d'exécution.
+
+Ce qu'on mocke, et pourquoi :
+
+```
+┌───────────────────────────┬──────────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────┐
+│       Fichier testé       │                        Ce qu'on mocke                        │                         Pourquoi                         │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│                           │                                                              │ Fonction 100 % déterministe, on lui passe des dict       │
+│ router.py                 │ Rien                                                         │ construits à la main (comme dans tes anciens tests       │
+│                           │                                                              │ jetables de Phase 3, mais formalisés en vrais tests      │
+│                           │                                                              │ pytest)                                                  │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ nodes.py (rag_node)       │ search_local_horror_lore, query_movie_metadata               │ Éviter tout appel FAISS/HTTP réel                        │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ nodes.py (scraper_node)   │ enrich_from_web                                              │ Éviter un vrai appel réseau à Wikipédia                  │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ nodes.py (narration_node) │ _get_narrator_llm (renvoie un faux LLM),                     │ Éviter tout appel Ollama réel ou requête pgvector        │
+│                           │ find_similar_horror_movies                                   │                                                          │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ horror_tools.py           │ Rien (sauf random.randint figé dans un seul test pour un     │ Fonctions pures                                          │
+│                           │ résultat déterministe)                                       │                                                          │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ security.py               │ Rien                                                         │ bcrypt/JWT sont déterministes avec une config donnée     │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│                           │ config.AUTH_USERNAME/AUTH_PASSWORD_HASH (monkeypatchés avec  │ On ne connaît pas le vrai mot de passe en clair de ton   │
+│ src/api/auth.py           │ un couple utilisateur/mot de passe de test, connu)           │ .env (seul le hash y est) — impossible de tester le      │
+│                           │                                                              │ login "correct" sans ça                                  │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ data_api/routers/films.py │ get_db_connection (fausse connexion/curseur renvoyant des    │ Éviter toute vraie requête Supabase                      │
+│                           │ lignes construites à la main)                                │                                                          │
+└───────────────────────────┴──────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────┘
+```
+
+
+## 10.2 Tests d'intégration ##
+
+- Lance l'API, envoie une requête et vérifie que le flux RAG → Narration ou RAG → Scraper → Narration fonctionne.
+- Teste le flux d'authentification complet (login / refresh / accès protégé).
+
+## 10.3 Couverture de tests ##
+
+Vise une couverture ≥ 80 % sur les deux API et l'UI (`pytest-cov`).
+
+## 10.4 Pipeline CI/CD ##
+
+Mets en place un pipeline (ex. GitHub Actions) qui lance : lint, tests + couverture, build des images Docker, à chaque push/PR.
+
 
 
 
@@ -3618,3 +3705,4 @@ C'est le même principe que data/faiss_index/*.faiss ou docs/build/html/* : arte
 Si tu veux ce workflow GitHub Pages, il faudra en plus :
 - Activer Pages dans les settings du repo (Build and deployment → GitHub Actions)
 - Ajouter .github/workflows/docs.yml (repris de ton PDF)
+

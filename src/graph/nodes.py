@@ -482,7 +482,7 @@ def narration_node(state: AgentState) -> dict:
         try:
             titre_cible = movies[0].get("title") or movies[0].get("titre") or query if movies else query
             logger.debug(f"[Narration] Outil survie pour {titre_cible!r}")
-            result_surv = horror_survival_simulator(titre_cible, user_role="spectateur")
+            result_surv = horror_survival_simulator(titre_cible, user_context="spectateur")
             tool_blocks.append("=== SIMULATEUR DE SURVIE ===")
             tool_blocks.append(str(result_surv))
         except Exception as exc:

@@ -82,9 +82,9 @@ horragor-project/
 │   └── routers/
 │       └── films.py                 # Endpoints /films (recherche, fuzzy, détail, similarité pgvector)
 ├── docker/                          # Dockerfiles des 3 services applicatifs
-│   ├── data_api.Dockerfile
-│   ├── frontend.Dockerfile
-│   └── intelligence_api.Dockerfile
+│   ├── data_api.Dockerfile          # Image du service Données (port 8001)
+│   ├── frontend.Dockerfile          # Image du frontend Streamlit (port 8501)
+│   └── intelligence_api.Dockerfile  # Image du service Intelligence (port 8000, HTTPS)
 ├── docs/                            # Documentation technique Sphinx (Phase 9)
 │   └── source/
 │       ├── conf.py                  # autodoc, napoleon, myst_parser, sphinxcontrib.mermaid
@@ -118,19 +118,19 @@ horragor-project/
 │   ├── models/
 │   │   └── state.py                 # AgentState — mémoire commune partagée
 │   ├── observability/
-│   │   ├── logging_config.py
-│   │   ├── json_serializer.py
+│   │   ├── logging_config.py        # Config Loguru (JSON, rotation, interception stdlib)
+│   │   ├── json_serializer.py       # Aplatit les logs Loguru en JSON pour le monitoring
 │   │   └── langfuse_client.py
 │   └── tools/
 │       ├── rag_tool.py              # FAISS + appels HTTP vers data-api
 │       ├── scraper_tool.py          # Enrichissement Wikipédia (API MediaWiki)
 │       └── horror_tools.py          # Âge du film, simulateur de survie
 ├── app_frontend.py                  # UI Streamlit (Phase 5)
-├── docker-compose.yml                # Orchestration des services (prod-like)
-├── docker-compose.dev.yml            # Override dev (ports exposés, volumes de logs)
-├── prometheus.yml                    # Configuration du scraping Prometheus
-├── pyproject.toml                    # Dépendances et métadonnées (uv)
-└── .env.example                      # Modèle de configuration (sans secrets)
+├── docker-compose.yml               # Orchestration des services (prod-like)
+├── docker-compose.dev.yml           # Override dev (ports exposés, volumes de logs)
+├── prometheus.yml                   # Configuration du scraping Prometheus
+├── pyproject.toml                   # Dépendances et métadonnées (uv)
+└── .env.example                     # Modèle de configuration (sans secrets)
 ```
 
 ## ✅ Prérequis
