@@ -243,3 +243,4 @@ Chaque `push` et chaque `pull_request` vers `main` déclenche le pipeline défin
 Les anomalies se déclarent via le template d'issue GitHub (`.github/ISSUE_TEMPLATE/bug_report.md`), qui demande : le nœud/composant concerné (RAG, Scraper, Narration, Router, API Données, API Intelligence, Frontend), la requête test permettant de reproduire, le résultat attendu vs obtenu, et les logs Langfuse si pertinent.
 
 Règle du projet : **toute anomalie détectée donne lieu à un ticket archivé avant correction.**
+
