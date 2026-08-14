@@ -3766,3 +3766,71 @@ Les etapes :
 
 - Le pipeline ne sera réellement validé qu'au premier push vers GitHub 
 
+# Phase 11 : final #
+
+Finaliser le README :
+1. Badge CI en haut du README, pointant vers nicolastchenio/simplon_projet7_horagor3 (récupéré depuis votre remote git).
+2. Structure du projet : ajouter .github/ (workflows/ci.yml + ISSUE_TEMPLATE/bug_report.md), actuellement absent de l'arborescence.
+3. Stack technique : ajouter ruff (lint) à la ligne "Tests".
+4. Nouvelle section "🔁 Intégration continue (CI/CD)" décrivant les 3 jobs (lint, test, build) et leur déclenchement.
+5. Nouvelle section "🐛 Signaler un bug" pointant vers le template d'issue et la règle "chaque anomalie = un ticket avant correction".
+
+Documentation sphinx sur github pages :  
+- creation du fichier ".github/workflows/docs.yml"
+    ```
+    name: Deploy Sphinx docs to GitHub Pages
+
+    on:
+    push:
+    quand le schéma/graphe change, comme déjà documenté dans le RE
+    2. Sphinx et ses extensions (myst-parser, sphinx-rtd-theme, sphinxcontrib-mermaid) sont dans le groupe dev de pyproject.toml → uv sync (déjà utilisé dans ci.yml) les installe automatiquement.
+
+    Fichier proposé : .github/workflows/docs.yml
+
+    name: Deploy Sphinx docs to GitHub Pages
+
+    on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+    permissions:
+    contents: read
+    pages: write
+    id-token: write
+
+    concurrency:
+    group: "pages"
+    cancel-in-progress: false
+
+    jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: astral-sh/setup-uv@v5
+            with:
+            python-version: "3.12"
+        - run: uv sync --locked
+        - run: uv run sphinx-build -b html docs/source public
+        - uses: actions/upload-pages-artifact@v3
+            with:
+            path: public
+
+    deploy:
+        needs: build
+        runs-on: ubuntu-latest
+        environment:
+        name: github-pages
+        url: ${{ steps.deployment.outputs.page_url }}
+        steps:
+        - id: deployment
+            uses: actions/deploy-pages@v4
+    ```
+- Se déclenche sur push vers main (+ lancement manuel possible), pas sur les PR.
+- Workflow séparé de ci.yml (convention standard pour Pages).
+
+- Dans les Settings du repo GitHub → Pages → Build and deployment → Source : sélectionner "GitHub Actions".
+
+Une fois activé et le premier déploiement passé, la doc sera visible à https://nicolastchenio.github.io/simplon_projet7_horagor3/ — je pourrai ajouter ce lien au README ensuite.
+
