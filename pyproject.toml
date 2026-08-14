@@ -29,3 +29,10 @@ dependencies = [
     "supabase>=2.31.0",
     "uvicorn[standard]>=0.51.0",
 ]
+
+[dependency-groups]
+dev = [
+    "myst-parser>=5.1.0",
+    "sphinx-rtd-theme>=3.1.0",
+    "sphinxcontrib-mermaid>=2.1.0",
+]

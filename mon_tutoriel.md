@@ -3545,3 +3545,76 @@ Surveille les 3 GET /health (déjà présents depuis la Phase 4.3, y compris _st
       - Intervalle : 60 secondes
       - Codes de statut acceptés : 200-299 (par défaut)
       - Pas besoin d'ignorer TLS ici (HTTP simple, pas de certificat).
+
+
+## Phase 9 : Documentation Sphinx ##
+
+### 9.1 Setup Sphinx ###
+
+Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`).  
+   - Installe le thème RTD et le support Markdown :
+
+        `uv add --dev sphinx-rtd-theme myst_parser `
+
+   - Lancer sphinx-quickstart en mode non-interactif (--quiet) pour créer une structure standard, plutôt que l'assistant interactif (qui demande une dizaine de questions une par une) :
+
+        ` uv run sphinx-quickstart docs --quiet --sep -p HorRAGor -a "Nicolas Tchenio" -v 0.1 --language=fr --ext-autodoc --ext-viewcode --makefile --batchfile `
+
+        Ce que ça crée :
+        - docs/source/conf.py, docs/source/index.rst (racine de la doc)
+        - docs/build/ (dossier de sortie HTML, séparé grâce à --sep)
+        - docs/Makefile + docs/make.bat (scripts de build pratiques)
+        - Active déjà sphinx.ext.autodoc et sphinx.ext.viewcode dans conf.py
+
+   - Editer conf.py à la main pour :
+      - ajouter sphinx_rtd_theme, sphinx.ext.napoleon, myst_parser aux extensions
+      - changer html_theme = "alabaster" → "sphinx_rtd_theme"
+      - configurer sys.path.insert(0, ...) vers la racine du projet pour qu'autodoc trouve src et data_api
+
+### 9.2 Contenu obligatoire ###
+
+1. **Doc API automatisée** : pour les **deux** API (Données + Intelligence), via `autodoc` (`automodule::` sur `src.main`, `src.api.auth`, `data_api.main`, `data_api.routers.films`, etc.), on s'appuie sur les docstrings déjà rédigées en français dans le code.  
+   La doc HTML est dans docs/build/html/index.html.
+
+2. **Schéma relationnel** : documente la base Supabase (tables, relations, clés primaires), y compris la colonne vectorielle ajoutée en Phase 0.3. Génération automatique via un script d'introspection SQL (`information_schema.columns` + `table_constraints`/`key_column_usage`) produisant un tableau par table en RST/Markdown, complété par un diagramme relationnel en `erDiagram` Mermaid — reproductible si le schéma évolue.
+
+   - Nouvelle dépendance nécessaire : pour afficher les diagrammes Mermaid (erDiagram pour la base, et draw_mermaid() plus tard pour le graphe) dans le HTML généré par Sphinx, il faut l'extension sphinxcontrib-mermaid (elle ajoute la directive .. mermaid:: et charge mermaid.js côté navigateur). ` uv add --dev sphinxcontrib-mermaid `
+
+   - Script scripts/generate_db_schema_doc.py — réutilise src.tools.rag_tool._get_db_connection() (même connexion que faiss_to_pgvector.py), interroge le catalogue PostgreSQL (pg_attribute/pg_class + information_schema.table_constraints) pour récupérer, par table du schéma public :
+     - colonnes (nom, type exact — y compris vector(768) pour la colonne embedding —, nullable, défaut)
+     - clé primaire
+     - clés étrangères (relations entre tables)
+
+   - Génération de docs/source/schema_bdd.rst contenant :
+     - un erDiagram Mermaid (entités + relations détectées automatiquement)
+     - un tableau détaillé par table (colonne / type / nullable / PK-FK)
+     - une note précisant que ce fichier est généré, avec la commande pour le régénérer si le schéma évolue
+
+   - Référencer schema_bdd dans le toctree de index.rst, puis rebuild pour vérifier.
+
+3. **Cartographie du graphe** : génère un schéma des nodes, du router et des edges conditionnelles via `graph.get_graph().draw_mermaid()` (texte Mermaid intégré nativement dans une page Sphinx, sans dépendance réseau ni Graphviz).
+
+
+### 9.3 Build ###
+
+Génère la documentation HTML finale (`uv run sphinx-build -b html docs/source docs/build/html`).
+
+
+
+
+--------
+Pourquoi : le déploiement GitHub Pages (comme celui montré dans ton PDF de référence, page 7-8) ne dépend jamais d'un docs/build/ committé dans le dépôt. Le workflow GitHub Actions :
+
+1. Checkout du code
+2. uv sync (installe Sphinx et les dépendances)
+3. uv run sphinx-build docs/source public — régénère le HTML à neuf, directement dans le runner CI
+4. Upload de ce HTML frais comme "Pages artifact"
+5. Déploiement vers GitHub Pages
+
+Le HTML généré ne transite jamais par git commit — il est construit puis déployé dans la même exécution CI, sans jamais être versionné. docs/build/ (ou public/) dans .gitignore est donc exactement ce qu'il faut : les sources (docs/source/*.rst, les scripts générateurs, README.md) sont versionnées, le HTML généré ne l'est jamais — ni en local, ni en CI.
+
+C'est le même principe que data/faiss_index/*.faiss ou docs/build/html/* : artefact régénérable, jamais committé.
+
+Si tu veux ce workflow GitHub Pages, il faudra en plus :
+- Activer Pages dans les settings du repo (Build and deployment → GitHub Actions)
+- Ajouter .github/workflows/docs.yml (repris de ton PDF)

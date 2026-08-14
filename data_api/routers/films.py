@@ -1,6 +1,6 @@
 """
 data_api/routers/films.py
-========================
+==========================
 Router FastAPI exposant les opérations métiers sur le catalogue films.
 
 Toutes les requêtes SQL sont centralisées ici ; l'API Intelligence

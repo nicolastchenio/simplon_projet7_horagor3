@@ -62,21 +62,8 @@ class JsonFileSink:
     Écrit une ligne JSON par message, avec rotation par taille.
     Thread-safe grâce à un ``threading.Lock``.
 
-    :IVariables:
-        .. attribute:: path
-           :type: Path
-
-           Chemin du fichier de log actif.
-
-        .. attribute:: max_bytes
-           :type: int
-
-           Taille maximale en octets avant déclenchement de la rotation.
-
-        .. attribute:: backup_count
-           :type: int
-
-           Nombre de fichiers de backup conservés (``*.1``, ``*.2``, …).
+    Les attributs ``path``, ``max_bytes`` et ``backup_count`` sont
+    documentés au niveau de :meth:`__init__` (mêmes noms, mêmes types).
 
     :note:
         La rotation suit la convention Loguru : ``{path}.1``,
