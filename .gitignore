@@ -151,6 +151,7 @@ cache/
 # ------------------------------------------------------------------------------
 # Rapports de coverage (générés par pytest-cov)
 htmlcov/
+coverage.xml
 .tox/
 .nox/
 

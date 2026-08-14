@@ -18,6 +18,8 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       JWT_SECRET_KEY: ci_test_secret_key
       AUTH_PASSWORD_HASH: ci_test_password_hash_placeholder
@@ -27,7 +29,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --locked
-      - run: uv run pytest --cov --cov-report=term-missing
+      - run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+      - run: uv run genbadge coverage -i coverage.xml -o coverage.svg
+      - name: Commit coverage badge
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add coverage.svg
+          git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
+          git diff --staged --quiet || git push
 
   build:
     runs-on: ubuntu-latest

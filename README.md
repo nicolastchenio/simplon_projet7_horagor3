@@ -1,6 +1,7 @@
 # HorRAGor 🎬🩸
 
 [![CI](https://github.com/nicolastchenio/simplon_projet7_horagor3/actions/workflows/ci.yml/badge.svg)](https://github.com/nicolastchenio/simplon_projet7_horagor3/actions/workflows/ci.yml)
+![Coverage](https://raw.githubusercontent.com/nicolastchenio/simplon_projet7_horagor3/main/coverage.svg)
 
 Chatbot spécialisé cinéma d'horreur, propulsé par un **graphe multi-agent LangGraph** (RAG + Scraper + Narration) interrogeant une base de 7392 films, avec inférence 100 % locale via Ollama.
 

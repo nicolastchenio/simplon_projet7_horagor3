@@ -3832,5 +3832,38 @@ Documentation sphinx sur github pages :
 
 - Dans les Settings du repo GitHub → Pages → Build and deployment → Source : sélectionner "GitHub Actions".
 
-Une fois activé et le premier déploiement passé, la doc sera visible à https://nicolastchenio.github.io/simplon_projet7_horagor3/ — je pourrai ajouter ce lien au README ensuite.
+Une fois activé et le premier déploiement passé, la doc sera visible à https://nicolastchenio.github.io/simplon_projet7_horagor3/
 
+Ajout du badge du taux de coverage :
+- ajoute genbadge[coverage] comme dépendance de développement => ` uv add --dev "genbadge[coverage]" `
+- modification de ci.yml. Génération XML, genbadge, commit conditionnel avec [skip ci] pour éviter la boucle CI.
+    ```
+    test:
+        runs-on: ubuntu-latest
+        permissions:
+        contents: write
+        env:
+        JWT_SECRET_KEY: ci_test_secret_key
+        AUTH_PASSWORD_HASH: ci_test_password_hash_placeholder
+        steps:
+        - uses: actions/checkout@v4
+        - uses: astral-sh/setup-uv@v5
+            with:
+            python-version: "3.12"
+        - run: uv sync --locked
+        - run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+        - run: uv run genbadge coverage -i coverage.xml -o coverage.svg
+        - name: Commit coverage badge
+            if: github.ref == 'refs/heads/main'
+            run: |
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add coverage.svg
+            git diff --staged --quiet || git commit -m "chore: update coverage badge [skip ci]"
+            git diff --staged --quiet || git push
+    ```
+- coverage.xml n'est pas dans .gitignore (c'est un fichier généré, comme .coverage/htmlcov/) — je l'ajoute pour éviter qu'il soit commité par erreur en local.
+- Ajout du badge de couverture dans le README.md (avec la bonne URL de repo cette fois).
+` ![Coverage](https://raw.githubusercontent.com/nicolastchenio/simplon_projet7_horagor3/main/coverage.svg) `
+
+    Point d'attention : le badge de couverture affichera une image cassée (404) jusqu'au premier push sur main qui exécutera le job test et créera coverage.svg à la racine du repo. C'est normal, ça se résout au premier push.
