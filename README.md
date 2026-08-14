@@ -1,5 +1,7 @@
 # HorRAGor 🎬🩸
 
+[![CI](https://github.com/nicolastchenio/simplon_projet7_horagor3/actions/workflows/ci.yml/badge.svg)](https://github.com/nicolastchenio/simplon_projet7_horagor3/actions/workflows/ci.yml)
+
 Chatbot spécialisé cinéma d'horreur, propulsé par un **graphe multi-agent LangGraph** (RAG + Scraper + Narration) interrogeant une base de 7392 films, avec inférence 100 % locale via Ollama.
 
 ## Aperçu
@@ -57,6 +59,7 @@ Le réseau Docker `horragor_net` isole `data_api` de l'extérieur : seule `intel
 - **Authentification** : JWT (access + refresh tokens), bcrypt
 - **Observabilité** : Langfuse (traces LLM), Loguru (logs JSON structurés), Prometheus + Grafana + Uptime Kuma
 - **Tests** : pytest, pytest-cov (couverture ≥80 % imposée sur les 2 API + l'UI)
+- **Qualité de code** : ruff (lint), GitHub Actions (CI/CD)
 - **Documentation** : Sphinx (autodoc, napoleon, myst-parser, mermaid)
 - **Conteneurisation** : Docker Compose (réseau `bridge` dédié)
 - **Packaging** : `uv`
@@ -65,6 +68,12 @@ Le réseau Docker `horragor_net` isole `data_api` de l'extérieur : seule `intel
 
 ```
 horragor-project/
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml                    # Pipeline CI/CD : lint, tests + couverture, build Docker (Phase 10.4)
+│   │   └── docs.yml                  # Build + déploiement de la doc Sphinx sur GitHub Pages
+│   └── ISSUE_TEMPLATE/
+│       └── bug_report.md            # Template de signalement d'anomalie (Phase 10.5)
 ├── .streamlit/
 │   └── config.toml                  # Thème "Horror" (Phase 0.4)
 ├── certs/                           # Certificats TLS auto-signés (générés, non versionnés)
@@ -207,6 +216,8 @@ uv run sphinx-build -b html docs/source docs/build/html
 
 La doc est ensuite consultable dans `docs/build/html/index.html`.
 
+Elle est aussi publiée automatiquement sur **GitHub Pages** à chaque push sur `main` via `.github/workflows/docs.yml` : **https://nicolastchenio.github.io/simplon_projet7_horagor3/** (nécessite d'activer Pages dans Settings → Pages → Source = "GitHub Actions").
+
 ## 🧪 Tests & couverture
 
 La suite de tests (217 tests) couvre les deux API et l'interface Streamlit, avec un seuil de couverture minimal de 80 % imposé via `pytest-cov` (`fail_under` dans `pyproject.toml`).
@@ -216,3 +227,19 @@ uv run pytest --cov --cov-report=term-missing
 ```
 
 Couverture actuelle : **~96 %** (`src` ~94 %, `data_api` ~99 %, `app_frontend.py` ~99 %).
+
+## 🔁 Intégration continue (CI/CD)
+
+Chaque `push` et chaque `pull_request` vers `main` déclenche le pipeline défini dans `.github/workflows/ci.yml` :
+
+| Job | Contenu |
+|---|---|
+| `lint` | `ruff check .` (imports, erreurs de style, modernisation syntaxe) |
+| `test` | `pytest --cov` — échoue si la couverture repasse sous 80 % |
+| `build` | Build des 3 images Docker (`data_api`, `intelligence_api`, `frontend`), uniquement si `lint` et `test` réussissent |
+
+## 🐛 Signaler un bug
+
+Les anomalies se déclarent via le template d'issue GitHub (`.github/ISSUE_TEMPLATE/bug_report.md`), qui demande : le nœud/composant concerné (RAG, Scraper, Narration, Router, API Données, API Intelligence, Frontend), la requête test permettant de reproduire, le résultat attendu vs obtenu, et les logs Langfuse si pertinent.
+
+Règle du projet : **toute anomalie détectée donne lieu à un ticket archivé avant correction.**
