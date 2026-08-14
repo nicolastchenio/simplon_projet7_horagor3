@@ -13,13 +13,13 @@ effectivement déployée.
 
 import time
 
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 from loguru import logger
 
-from src.models.state import AgentState
-from src.graph.nodes import rag_node, scraper_node, narration_node
+from src.graph.nodes import narration_node, rag_node, scraper_node
 from src.graph.router import route_after_rag
+from src.models.state import AgentState
 
 
 def build_horragor_graph():

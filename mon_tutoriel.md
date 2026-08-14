@@ -3702,23 +3702,67 @@ Note : Les modules observability/* (logging_config, json_serializer, langfuse_cl
 
 Mets en place un pipeline (ex. GitHub Actions) qui lance : lint, tests + couverture, build des images Docker, à chaque push/PR.
 
+Structure du pipeline (.github/workflows/ci.yml)
+- Déclencheurs : push (toutes branches) et pull_request (vers main).
+- Job lint : uv run ruff check .
+- Job test (en parallèle du lint) : uv run pytest --cov --cov-report=term-missing (le seuil fail_under=80 déjà configuré fait échouer le job si la couverture retombe sous 80 %).
+- Job build (needs: [lint, test], ne se lance que si les deux précédents passent) : build des 3 images Docker (data_api, intelligence_api, frontend) via docker build -f docker/xxx.Dockerfile ., sans push vers un registre (non demandé par le plan).
+- Utilise l'action officielle astral-sh/setup-uv pour l'installation d'uv avec cache.
+
+Les etapes :
+- Installer ruff car aucun outil de lint n'est configuré dans le projet actuellement. ajouter en dépendance dev via ` uv add --dev ruff `.
+
+    J'exclus ces deux règles du lint :
+    ```
+    [tool.ruff.lint]
+    select = ["E", "F", "I", "UP"]
+    ignore = ["E501", "E402"]
+    ```
+
+    car :
+    - E501 (123×) — lignes trop longues. Le code contient beaucoup de f-strings/docstrings en français assez longs (logs Loguru détaillés notamment). Les corriger impliquerait de reformater une grande partie du codebase — hors périmètre d'une mise en place de CI, et purement cosmétique.
+    - E402 (12×) — imports pas en tête de fichier. Vérifié sur data_api/main.py : c'est volontaire (setup_logging() doit s'exécuter avant l'import des routers pour capter toute l'initialisation — commenté explicitement dans le fichier). Le corriger casserait ce comportement voulu.
+
+- Les tests nécessitent JWT_SECRET_KEY et AUTH_PASSWORD_HASH (sinon src/config.py lève une erreur au chargement) — il n'y a pas de secret réel requis pour les tests (ils sont mockés), donc je fixe des valeurs factices directement dans le workflow.  
+    Voici le workflow que je propose pour .github/workflows/ci.yml (j'ai vérifié : uv.lock est bien versionné, donc uv sync --locked est fiable ; les 3 Dockerfiles se build sans secret) :
+    ```
+    name: CI
+
+    on:
+    push:
+    pull_request:
+        branches: [main]
+
+    jobs:
+    lint:
+        runs-on: ubuntu-latest
+        steps:
 
 
+    test:
+        runs-on: ubuntu-latest
+        env:
+        JWT_SECRET_KEY: ci_test_secret_key
+        AUTH_PASSWORD_HASH: ci_test_password_hash_placeholder
+        steps:
+        - uses: actions/checkout@v4
 
+        - run: uv run pytest --cov --cov-report=term-missing
 
---------
-Pourquoi : le déploiement GitHub Pages (comme celui montré dans ton PDF de référence, page 7-8) ne dépend jamais d'un docs/build/ committé dans le dépôt. Le workflow GitHub Actions :
+    build:
+        runs-on: ubuntu-latest
+        needs: [lint, test]
+        steps:
+        - uses: actions/checkout@v4
+    er/data_api.Dockerfile -t horragor-data-api:ci .
+        - run: docker build -f docker/intelligence_api.Dockerfile -t horragor-intelligence-api:ci .
+        - run: docker build -f docker/frontend.Dockerfile -t horragor-frontend:ci .
+    ```
 
-1. Checkout du code
-2. uv sync (installe Sphinx et les dépendances)
-3. uv run sphinx-build docs/source public — régénère le HTML à neuf, directement dans le runner CI
-4. Upload de ce HTML frais comme "Pages artifact"
-5. Déploiement vers GitHub Pages
+    Points notés :
+    - JWT_SECRET_KEY/AUTH_PASSWORD_HASH sont des valeurs factices e, tout est mocké dans les tests).
+    - build ne se lance que si lint et test réussissent (needs:), pas de push vers un registre (non demandé).
+    - fail_under=80 déjà actif dans pyproject.toml fait échouer test si la couverture repasse sous 80 %.
 
-Le HTML généré ne transite jamais par git commit — il est construit puis déployé dans la même exécution CI, sans jamais être versionné. docs/build/ (ou public/) dans .gitignore est donc exactement ce qu'il faut : les sources (docs/source/*.rst, les scripts générateurs, README.md) sont versionnées, le HTML généré ne l'est jamais — ni en local, ni en CI.
+- Le pipeline ne sera réellement validé qu'au premier push vers GitHub 
 
-C'est le même principe que data/faiss_index/*.faiss ou docs/build/html/* : artefact régénérable, jamais committé.
-
-Si tu veux ce workflow GitHub Pages, il faudra en plus :
-- Activer Pages dans les settings du repo (Build and deployment → GitHub Actions)
-- Ajouter .github/workflows/docs.yml (repris de ton PDF)

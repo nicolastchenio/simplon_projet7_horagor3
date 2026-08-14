@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from src.config import FAISS_COSINE_THRESHOLD
 from src.graph.router import (
-    MIN_STRUCTURAL_MATCHES,
     _extract_best_faiss_score,
     _faiss_is_relevant,
     _structured_has_matches,

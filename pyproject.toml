@@ -33,9 +33,14 @@ dependencies = [
 [dependency-groups]
 dev = [
     "myst-parser>=5.1.0",
+    "ruff>=0.16.3",
     "sphinx-rtd-theme>=3.1.0",
     "sphinxcontrib-mermaid>=2.1.0",
 ]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501", "E402"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

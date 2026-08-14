@@ -14,18 +14,20 @@ que le moteur fusionnera dans l'``AgentState`` global.
 from __future__ import annotations
 
 import re
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_ollama import ChatOllama
 from loguru import logger
 
-from src.config import OLLAMA_CHAT_MODEL, OLLAMA_BASE_URL
+from src.config import OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL
 from src.models.state import AgentState
-from src.tools.rag_tool import search_local_horror_lore
-from src.tools.rag_tool import query_movie_metadata  # outil structuré défini en Phase 1
-from src.tools.scraper_tool import enrich_from_web
-from langchain_core.messages import AIMessage
-from langchain_ollama import ChatOllama
-from langchain_core.messages import SystemMessage, HumanMessage
 from src.tools.horror_tools import calculate_movie_age, horror_survival_simulator
-from src.tools.rag_tool import find_similar_horror_movies
+from src.tools.rag_tool import (
+    find_similar_horror_movies,
+    query_movie_metadata,  # outil structuré défini en Phase 1
+    search_local_horror_lore,
+)
+from src.tools.scraper_tool import enrich_from_web
 
 
 def rag_node(state: AgentState) -> dict:

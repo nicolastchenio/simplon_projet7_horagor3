@@ -11,7 +11,7 @@ le cycle encode/decode est vérifié.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
 
 import bcrypt
 import jwt
@@ -19,7 +19,6 @@ import pytest
 
 from src import config
 from src.auth import security
-
 
 # ═══════════════════════════════════════════════════════════════
 # Mots de passe (bcrypt)
@@ -92,9 +91,9 @@ class TestVerifyAccessToken:
             security.verify_access_token(refresh_token)
 
     def test_token_sans_sub_leve_valueerror(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         token_sans_sub = jwt.encode(
             {"type": "access", "iat": now, "exp": now + timedelta(minutes=5)},
             config.JWT_SECRET_KEY,

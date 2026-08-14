@@ -21,7 +21,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from src.graph import nodes
 
-
 # ═══════════════════════════════════════════════════════════════
 # rag_node
 # ═══════════════════════════════════════════════════════════════

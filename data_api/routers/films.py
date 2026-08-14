@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from loguru import logger
 from psycopg2.extras import RealDictCursor
 from rapidfuzz import fuzz, process
 

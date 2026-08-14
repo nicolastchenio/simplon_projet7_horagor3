@@ -10,7 +10,6 @@ que ce soit en entrée (embedding, filtres) ou en sortie (fiches films).
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
-from typing import List, Optional
 
 
 class FilmDetail(BaseModel):
@@ -19,25 +18,25 @@ class FilmDetail(BaseModel):
     """
     id_film: int
     titre: str
-    annee_sortie: Optional[int] = None
-    langue_originale: Optional[str] = None
-    synopsis: Optional[str] = None
-    tagline: Optional[str] = None
-    duree: Optional[int] = Field(
+    annee_sortie: int | None = None
+    langue_originale: str | None = None
+    synopsis: str | None = None
+    tagline: str | None = None
+    duree: int | None = Field(
         default=None,
         description="Durée en minutes.",
     )
-    budget: Optional[float] = None
-    revenue: Optional[float] = None
-    realisateur: Optional[str] = Field(
+    budget: float | None = None
+    revenue: float | None = None
+    realisateur: str | None = Field(
         default=None,
         description="Nom du réalisateur (agrégation SQL).",
     )
-    genres: List[str] = Field(
+    genres: list[str] = Field(
         default_factory=list,
         description="Liste des genres associés.",
     )
-    casting: List[str] = Field(
+    casting: list[str] = Field(
         default_factory=list,
         description="Liste des acteurs principaux agrégés.",
     )
@@ -47,13 +46,13 @@ class SimilarityRequest(BaseModel):
     """
     Corps de la requête POST /films/similar (recherche pgvector).
     """
-    embedding: List[float] = Field(
+    embedding: list[float] = Field(
         ...,
         min_length=768,
         max_length=768,
         description="Vecteur de similarité (768 dims, nomic-embed-text).",
     )
-    exclude_id_film: Optional[int] = Field(
+    exclude_id_film: int | None = Field(
         default=None,
         description="Identifiant du film à exclure (généralement la source).",
     )
@@ -79,7 +78,7 @@ class FilmSearchResponse(BaseModel):
     """
     Réponse paginée pour la recherche textuelle simple.
     """
-    results: List[FilmDetail]
+    results: list[FilmDetail]
     total: int
     query: str
     limit: int

@@ -30,7 +30,6 @@ from data_api.models import (
 )
 from data_api.routers import films
 
-
 # ═══════════════════════════════════════════════════════════════
 # data_api/config.py
 # ═══════════════════════════════════════════════════════════════

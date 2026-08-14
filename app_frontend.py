@@ -8,17 +8,19 @@ Ce module gère :
 - L'expiration automatique des tokens
 """
 
+import base64
+import json
 import os
 import time
 import uuid
-import json
-import base64
-from datetime import datetime, timedelta
+from datetime import datetime
+
 import httpx
 import streamlit as st
 from loguru import logger
-from src.config import API_BASE_URL, API_TIMEOUT
+
 from observability.logging_config import setup_logging
+from src.config import API_BASE_URL, API_TIMEOUT
 
 # 🔴 DOIT ÊTRE AVANT TOUT AUTRE CODE STREAMLIT
 st.set_page_config(

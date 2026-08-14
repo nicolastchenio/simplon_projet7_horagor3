@@ -14,10 +14,10 @@ calculable et testable unitairement.
 from __future__ import annotations
 
 from typing import Any, Literal
+
 from loguru import logger
 
 from src.config import FAISS_COSINE_THRESHOLD
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SEUILS CALIBRÉS (à affiner sur la batterie de tests utilisateur)

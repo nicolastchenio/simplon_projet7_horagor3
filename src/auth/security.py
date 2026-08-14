@@ -11,7 +11,7 @@ Aucun autre module ne doit manipuler directement les JWT ou bcrypt.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
@@ -46,7 +46,7 @@ def _create_token(subject: str, token_type: str, expires_delta: timedelta) -> st
     :param expires_delta: Durée de validité avant expiration.
     :returns: Le token JWT encodé sous forme de chaîne.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": subject,
         "type": token_type,

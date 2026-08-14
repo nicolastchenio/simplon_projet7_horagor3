@@ -16,7 +16,6 @@ import pytest
 
 from src.tools.horror_tools import calculate_movie_age, horror_survival_simulator
 
-
 # ═══════════════════════════════════════════════════════════════
 # calculate_movie_age
 # ═══════════════════════════════════════════════════════════════

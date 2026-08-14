@@ -19,7 +19,6 @@ import pytest
 
 from data_api import database
 
-
 # ═══════════════════════════════════════════════════════════════
 # Fakes communs (simulent l'API psycopg2 réelle, pas le wrapper)
 # ═══════════════════════════════════════════════════════════════

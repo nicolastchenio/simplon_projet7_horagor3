@@ -6,18 +6,21 @@ Charge le graphe LangGraph compilé au démarrage et expose un endpoint /chat.
 """
 
 from __future__ import annotations
-from datetime import datetime
+
 import asyncio
-import uuid
 import time
-from langchain_core.messages import HumanMessage
+import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
-from fastapi import FastAPI, HTTPException, status, Depends, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Any
+
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from langchain_core.messages import HumanMessage
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel, Field
 
 # ─────────────────────────────────────────────────────────────────
 # Configuration du logging Loguru — en premier pour capter toute
@@ -178,7 +181,7 @@ async def log_requests_middleware(request: Request, call_next):
     start_time = time.perf_counter()
     try:
         response = await call_next(request)
-    except Exception as exc:
+    except Exception:
         logger.bind(request_id=request_id, client_ip=client_ip).exception(
             f"✗ Exception durant le traitement de {request.method} {request.url.path}"
         )
