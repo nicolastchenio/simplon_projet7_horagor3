@@ -344,14 +344,12 @@ async def chat_endpoint(
     faiss_hits = rag_results.get("faiss", {}).get("hits", []) if isinstance(rag_results, dict) else []
     logger.bind(request_id=request_id).debug(f"[chat_endpoint] Sources FAISS extraites : {len(faiss_hits)}")
     for hit in faiss_hits:
-        meta = hit.get("metadata", {})
         sources.append(
             {
                 "type": "faiss",
                 "score": hit.get("score"),
-                "title": meta.get("titre"),
-                "year": meta.get("annee"),
-                "preview": (hit.get("chunk") or "")[:200],
+                "title": hit.get("source"),
+                "preview": (hit.get("text") or "")[:200],
             }
         )
 
