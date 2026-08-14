@@ -48,11 +48,9 @@ from src.observability.langfuse_client import (
 class ChatRequest(BaseModel):
     """Requête envoyée par le client pour discuter avec HorRAGor.
 
-    Attributs:
-        message: La question ou le sujet demandé par l'utilisateur.
-        thread_id: Identifiant de conversation pour la mémoire à long terme
-            gérée par le checkpointer LangGraph. Si absent, un nouvel UUID
-            est généré automatiquement à chaque appel.
+    Les champs sont documentés individuellement via leur ``Field(description=...)``
+    ci-dessous (``thread_id`` : mémoire à long terme gérée par le checkpointer
+    LangGraph ; si absent, un nouvel UUID est généré automatiquement).
     """
 
     message: str = Field(
@@ -70,11 +68,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Réponse structurée renvoyée par l'agent HorRAGor.
 
-    Attributs:
-        response: Texte final généré par le nœud de narration.
-        sources: Liste des sources exploitées (FAISS, SQL, web, etc.).
-        used_web: Indique si le scraper web a été sollicité pendant le traitement.
-        thread_id: Identifiant du thread utilisé (utile pour le suivi côté client).
+    Les champs sont documentés individuellement via leur ``Field(description=...)``
+    ci-dessous.
     """
 
     response: str = Field(..., description="Chronique générée par l'agent.")
@@ -239,8 +234,8 @@ async def chat_endpoint(
     """Traite une requête utilisateur via le graphe multi-agent.
 
     🔐 **AUTHENTIFICATION (Phase 7.2)**
-    Nécessite un header Authorization avec un access_token valide :
-        Authorization: Bearer {access_token}
+    Nécessite un header ``Authorization: Bearer {access_token}`` avec un
+    access_token valide.
 
     Le thread_id permet de reprendre une conversation si le client le
     renvoie, grâce au checkpointer MemorySaver configuré dans pipeline.py.

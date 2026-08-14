@@ -177,6 +177,7 @@ ipython_config.py
 site/
 _build/
 docs/_build/
+docs/build/
 
 # ------------------------------------------------------------------------------
 # Section 12 — Fichiers de verrouillage et métadonnées

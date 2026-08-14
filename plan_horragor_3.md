@@ -389,18 +389,17 @@ Ajoute des logs structurés de bout en bout sur les 3 composants : requêtes re�
 
 ### 9.1 Setup Sphinx ###
 
-Initialise Sphinx dans `docs/`, installe le thème RTD et `sphinxcontrib-openapi`.
+Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`). Installe le thème RTD et le support Markdown
 
 ### 9.2 Contenu obligatoire ###
 
-1. **Doc API automatisée** : pour les **deux** API (Données + Intelligence), via `sphinxcontrib-openapi` ou autodoc.
-2. **Schéma relationnel** : documente la base Supabase (tables, relations, clés primaires), y compris la colonne vectorielle ajoutée en Phase 0.3.
-3. **Cartographie du graphe** : génère un schéma des nodes, du router et des edges conditionnelles via `graph.get_graph().draw_mermaid_png()` (pas besoin de Graphviz) ou `draw_png()` si Graphviz est installé.
-4. **Guide d'installation** : Ollama (avec les deux modèles `qwen2.5:7b` et `nomic-embed-text`), FAISS, variables d'environnement, lancement Docker Compose.
+1. **Doc API automatisée** : pour les **deux** API (Données + Intelligence), via `autodoc` (`automodule::` sur `src.main`, `src.api.auth`, `data_api.main`, `data_api.routers.films`, etc.)
+2. **Schéma relationnel** : documente la base Supabase (tables, relations, clés primaires), y compris la colonne vectorielle ajoutée en Phase 0.3. Génération automatique via un script d'introspection SQL (`information_schema.columns` + `table_constraints`/`key_column_usage`) produisant un tableau par table en RST/Markdown, complété par un diagramme relationnel en `erDiagram` Mermaid — reproductible si le schéma évolue.
+3. **Cartographie du graphe** : génère un schéma des nodes, du router et des edges conditionnelles via `graph.get_graph().draw_mermaid()` (texte Mermaid intégré nativement dans une page Sphinx, sans dépendance réseau ni Graphviz).
 
 ### 9.3 Build ###
 
-Génère la documentation HTML finale.
+Génère la documentation HTML finale (`uv run sphinx-build -b html docs/source docs/build/html`).
 
 ---
 
@@ -448,7 +447,7 @@ Crée un template d'issue dans `.github/ISSUE_TEMPLATE/bug_report.md` avec les c
 - [ ] Langfuse trace les exécutions
 - [ ] Loguru journalise les 3 composants
 - [ ] Prometheus + Grafana + Uptime Kuma monitorent les 3 composants
-- [ ] Sphinx génère la doc (2 API, base de données, graphe, installation)
+- [ ] Sphinx génère la doc (2 API, base de données, graphe)
 - [ ] Couverture de tests ≥ 80 % (2 API + UI)
 - [ ] Pipeline CI/CD opérationnel
 - [ ] GitHub Issues template créé

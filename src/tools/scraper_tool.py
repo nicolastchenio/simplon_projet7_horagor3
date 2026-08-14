@@ -372,8 +372,7 @@ def extract_wikipedia_synopsis(movie_title: str) -> str:
 
     Stratégie :
     1. Interroger l'API pour lister les sections.
-    2. Identifier la section dont le titre contient *Synopsis*,
-       *Résumé* ou *Intrigue*.
+    2. Identifier la section dont le titre contient *Synopsis*, *Résumé* ou *Intrigue*.
     3. Demander à l'API le HTML **isolé** de cette section seule.
     4. Parser et nettoyer ce fragment HTML.
 

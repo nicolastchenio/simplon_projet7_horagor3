@@ -1,345 +1,194 @@
-# Structure du projet
+# HorRAGor 🎬🩸
+
+Chatbot spécialisé cinéma d'horreur, propulsé par un **graphe multi-agent LangGraph** (RAG + Scraper + Narration) interrogeant une base de 7392 films, avec inférence 100 % locale via Ollama.
+
+## Aperçu
+
+HorRAGor répond aux questions des utilisateurs sur le cinéma d'horreur en s'appuyant sur un graphe **peer-to-peer** (aucun superviseur LLM) : un routeur Python déterministe aiguille la requête entre trois agents spécialisés.
+
+| Agent | Rôle |
+|---|---|
+| **RAG** | Recherche vectorielle (FAISS) **et** structurée (SQL, via l'API Données) sur le savoir local |
+| **Scraper** | Enrichissement Wikipédia, déclenché uniquement si le savoir local est insuffisant |
+| **Narration** | Rédige la réponse finale dans la peau d'un chroniqueur gothique — isolation stricte de contexte (ne lit jamais l'historique brut des autres agents) et consigne anti-hallucination |
+
+## 🔗 URLs utiles
+
+*(une fois les conteneurs Docker démarrés)*
+
+| Service | URL | Description |
+|---|---|---|
+| Frontend Streamlit | http://localhost:8501/ | Interface de chat |
+| API Intelligence (docs) | https://localhost:8000/docs | Swagger FastAPI — endpoints `/chat`, `/auth`, `/health` |
+| Langfuse | http://localhost:3000/ | Traces d'exécution du graphe (latences, tokens, prompts) |
+| Prometheus | http://localhost:9092/ | Métriques brutes des deux API |
+| Grafana | http://localhost:3002/ | Dashboards de monitoring |
+| Uptime Kuma | http://localhost:3003/ | Surveillance de disponibilité des 3 services |
+
+> L'API Données (`data_api`, port 8001) n'a volontairement **aucune URL publique** : elle n'est joignable que par l'API Intelligence sur le réseau Docker interne (cf. section *Architecture* ci-dessous).
+
+## 🏗️ Architecture
+
+Trois couches strictement séparées — le frontend ne parle jamais directement à la base de données :
+
+| Couche | Rôle | Composant |
+|---|---|---|
+| Présentation | Interface utilisateur | Streamlit (`app_frontend.py`, port 8501) |
+| Intelligence | Graphe multi-agent LangGraph | `src/main.py` (port 8000, HTTPS) |
+| Données | Seule couche autorisée à parler à Supabase | `data_api/main.py` (port 8001, interne uniquement) |
+
+```
+┌─────────────┐   HTTPS/JWT    ┌───────────────────┐   HTTP interne   ┌──────────────┐   SQL+SSL   ┌──────────┐
+│  Streamlit  │ ─────────────► │  Intelligence API │ ───────────────► │   Data API   │ ──────────► │ Supabase │
+│  (8501)     │ ◄───────────── │  (8000, LangGraph) │ ◄─────────────── │   (8001)     │ ◄────────── │(pgvector)│
+└─────────────┘   JSON réponse └───────────────────┘   JSON données   └──────────────┘             └──────────┘
+```
+
+Le réseau Docker `horragor_net` isole `data_api` de l'extérieur : seule `intelligence-api` peut le joindre. `frontend` est le seul service avec un port publié vers l'hôte.
+
+## 🛠️ Stack technique
+
+- **Orchestration agents** : LangGraph, LangChain
+- **Inférence locale** : Ollama — `qwen2.5:7b` (génération) et `nomic-embed-text` (embeddings, 768D)
+- **Recherche vectorielle** : FAISS (index local) + pgvector (Supabase)
+- **Backend** : FastAPI, Uvicorn, Pydantic
+- **Frontend** : Streamlit
+- **Base de données** : Supabase (PostgreSQL + extension pgvector)
+- **Authentification** : JWT (access + refresh tokens), bcrypt
+- **Observabilité** : Langfuse (traces LLM), Loguru (logs JSON structurés), Prometheus + Grafana + Uptime Kuma
+- **Documentation** : Sphinx (autodoc, napoleon, myst-parser, mermaid)
+- **Conteneurisation** : Docker Compose (réseau `bridge` dédié)
+- **Packaging** : `uv`
+
+## 📁 Structure du projet
 
 ```
 horragor-project/
-├── data/                       # Données + script de génération de l'index vectoriel
-│   └── faiss_index/            # Index vectoriel généré en Phase 1
-│   │   ├── horror_index.faiss  # Index binaire FAISS (embeddings 768D)
-│   │   └── metadata.pkl        # Métadonnées liées aux vecteurs (id_film, titre, année)
-│   └── build_faiss_index.py    # Script one-shot : génère l'index FAISS depuis Supabase
-├── data_api/                   # Micro-service FastAPI d'accès aux données (Phase 6)
-│   ├── __init__.py             # Marqueur de package Python
-│   ├── config.py               # Config logs (Phase 8.2)
-│   ├── database.py             # Connexion PostgreSQL + wrapper de logging SQL (Phase 8.2)
-│   ├── models.py               # Schémas Pydantic (requêtes/réponses de l'API Données)
-│   ├── main.py                 # Point d'entrée FastAPI du service Données (port 8001)
-│   ├── observability/          # Logging Loguru autonome du service Données (Phase 8.2)
-│   │   ├── __init__.py         # Marqueur de package Python
-│   │   └── logging_config.py   # Config Loguru (JSON, rotation, interception stdlib)
-│   └── routers/                # Endpoints métiers (recherche, fiche film, similarité)
-│       ├── __init__.py         # Marqueur de package Python
-│       └── films.py            # Routes /films (recherche, fuzzy, détail, similarité pgvector)
-├── docker                      # Dockerfiles des 3 services
-│   ├── data_api.Dockerfile     # Image du service Données (port 8001)
-│   ├── frontend.Dockerfile     # Image du frontend Streamlit (port 8501)
-│   └── intelligence_api.Dockerfile  # Image du service Intelligence (port 8000, HTTPS)
-├── grafana/                    # Provisioning Grafana (Phase 8.3)
-│   └── provisioning/           # Auto-configuration au démarrage de Grafana
-│       └── datasources/        # Datasource provisionnée automatiquement
-│           └── datasource.yml  # Déclare Prometheus comme source de données par défaut
-├── scripts                     # Scripts utilitaires ponctuels
-│   ├── faiss_to_pgvector.py    # Copie les vecteurs FAISS existants vers la colonne pgvector
-│   └── generate_cert.py        # Génère un certificat TLS auto-signé (Phase 7.3)
-├── .streamlit/                 # Configuration Streamlit
-│   └── config.toml             # Thème "Horror" (Phase 0.4)
-├── observability/              # Logging Streamlit (Phase 8.2)
-│   ├── __init__.py             # Marqueur de package Python
-│   └── logging_config.py       # Config Loguru autonome du frontend Streamlit
-├── src/                        # API Intelligence (LangGraph, RAG, narration)
-│   ├── __init__.py             # Marqueur de package Python
-│   ├── main.py                 # Serveur FastAPI (API Intelligence)
-│   ├── config.py               # Config Ollama, clés API, chemins
-│   │──api/                     # Endpoints d'authentification
-│   │   ├── __init__.py         # Marqueur de package Python
-│   │   └── auth.py  
-│   │──observability/           # Logging Loguru + intégration Langfuse
-│   │   ├── __init__.py         # Marqueur de package Python
-│   │   ├── logging_config.py   # Config Loguru (JSON, rotation, interception stdlib)
-│   │   ├── json_serializer.py  # Aplatit les logs Loguru en JSON pour le monitoring
-│   │   └── langfuse_client.py  
-│   │──auth/                    # Sécurité : bcrypt + JWT
-│   │   ├── __init__.py         # Marqueur de package Python
-│   │   └── security.py         # Hash mots de passe + création/validation des JWT
-│   │──models/                  # Schémas de données partagés
-│   │   ├── __init__.py         # Marqueur de package Python
-│   │   └── state.py            # State partagé (mémoire commune)
-│   ├── tools/                  # Outils appelés par les nœuds du graphe
-│   │   ├── __init__.py         # Marqueur de package Python
-│   │   ├── rag_tool.py         # Recherche FAISS + SQL + pgvector
-│   │   ├── scraper_tool.py     # Recherche Web (Wikipedia)
-│   │   └── horror_tools.py     # Outils annexes (âge, simulateur de survie)
-│   └── graph/                  # Construction du graphe multi-agent LangGraph
-│       ├── __init__.py         # Marqueur de package Python
-│       ├── nodes.py            # Logique RAG, Scraper, Narration
-│       ├── router.py           # Fonctions d'aiguillage conditionnel
-│       └── pipeline.py         # Câblage et compilation du graphe
-├── docs/                       # Sphinx (Phase 9)
-├── tests/                      # Tests unitaires & intégration
-├── logs/                       # Logs Loguru des 3 services, montés en volume (Phase 8.2)
-├── pyproject.toml              # Dépendances et métadonnées du projet (uv)
-├── app_frontend.py             # UI Streamlit (Phase 5)
-├── .gitignore                  # Fichiers/dossiers exclus de Git
-├── docker-compose.dev.yml      # Override dev : ports exposés + volumes de logs
-├── docker-compose.yml          # Orchestration des 5 services (prod-like)
-├── prometheus.yml              # Config scraping Prometheus (Phase 8.3)
-├── .env                        # Variables d'environnement locales (secrets, non commité)
-├── .env.docker                 # Variables d'environnement pour les conteneurs Docker
-└── .env.example                # Modèle de .env à dupliquer (sans secrets)
+├── .streamlit/
+│   └── config.toml                  # Thème "Horror" (Phase 0.4)
+├── certs/                           # Certificats TLS auto-signés (générés, non versionnés)
+├── data/
+│   ├── faiss_index/                 # Index vectoriel généré en Phase 1
+│   │   ├── horror_index.faiss       # Embeddings 768D (nomic-embed-text)
+│   │   └── metadata.pkl             # Pont position vecteur → id_film / titre / année
+│   └── build_faiss_index.py         # Script one-shot : génère l'index FAISS depuis Supabase
+├── data_api/                        # Micro-service Données (Phase 6, port 8001)
+│   ├── config.py
+│   ├── database.py                  # Connexion PostgreSQL + wrapper de logging SQL
+│   ├── models.py                    # Schémas Pydantic
+│   ├── main.py                      # Point d'entrée FastAPI
+│   ├── observability/
+│   │   └── logging_config.py        # Config Loguru (JSON, rotation)
+│   └── routers/
+│       └── films.py                 # Endpoints /films (recherche, fuzzy, détail, similarité pgvector)
+├── docker/                          # Dockerfiles des 3 services applicatifs
+│   ├── data_api.Dockerfile
+│   ├── frontend.Dockerfile
+│   └── intelligence_api.Dockerfile
+├── docs/                            # Documentation technique Sphinx (Phase 9)
+│   └── source/
+│       ├── conf.py                  # autodoc, napoleon, myst_parser, sphinxcontrib.mermaid
+│       ├── index.rst                # Sommaire
+│       ├── readme.rst               # Inclusion de ce README (myst_parser)
+│       ├── intelligence_api.rst     # Doc API automatique — Intelligence
+│       ├── data_api.rst             # Doc API automatique — Données
+│       ├── schema_bdd.rst           # Schéma relationnel (généré, cf. scripts/)
+│       └── graphe_multi_agent.rst   # Cartographie du graphe (générée, cf. scripts/)
+├── grafana/
+│   └── provisioning/datasources/    # Datasource Prometheus auto-provisionnée
+├── logs/                            # Logs Loguru des 3 services (volume Docker, non versionné)
+├── observability/                   # Logging Loguru du frontend Streamlit
+│   └── logging_config.py
+├── scripts/                         # Scripts utilitaires ponctuels
+│   ├── faiss_to_pgvector.py         # Copie les vecteurs FAISS existants vers pgvector
+│   ├── generate_cert.py             # Génère le certificat TLS auto-signé (Phase 7.3)
+│   ├── generate_db_schema_doc.py    # Génère docs/source/schema_bdd.rst par introspection SQL
+│   └── generate_graph_doc.py        # Génère docs/source/graphe_multi_agent.rst via draw_mermaid()
+├── src/                             # API Intelligence — graphe LangGraph (port 8000)
+│   ├── main.py                      # Serveur FastAPI, endpoints /chat et /health
+│   ├── config.py                    # Configuration centralisée (Ollama, secrets, chemins)
+│   ├── api/
+│   │   └── auth.py                  # Endpoints /auth (login, refresh)
+│   ├── auth/
+│   │   └── security.py              # Hash bcrypt + émission/validation JWT
+│   ├── graph/
+│   │   ├── nodes.py                 # rag_node, scraper_node, narration_node
+│   │   ├── router.py                # route_after_rag — aiguillage déterministe
+│   │   └── pipeline.py              # Câblage et compilation du graphe
+│   ├── models/
+│   │   └── state.py                 # AgentState — mémoire commune partagée
+│   ├── observability/
+│   │   ├── logging_config.py
+│   │   ├── json_serializer.py
+│   │   └── langfuse_client.py
+│   └── tools/
+│       ├── rag_tool.py              # FAISS + appels HTTP vers data-api
+│       ├── scraper_tool.py          # Enrichissement Wikipédia (API MediaWiki)
+│       └── horror_tools.py          # Âge du film, simulateur de survie
+├── app_frontend.py                  # UI Streamlit (Phase 5)
+├── docker-compose.yml                # Orchestration des services (prod-like)
+├── docker-compose.dev.yml            # Override dev (ports exposés, volumes de logs)
+├── prometheus.yml                    # Configuration du scraping Prometheus
+├── pyproject.toml                    # Dépendances et métadonnées (uv)
+└── .env.example                      # Modèle de configuration (sans secrets)
 ```
 
-# demarrer le projet #
+## ✅ Prérequis
 
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [Ollama](https://ollama.com/) installé **au niveau système** (pas dans l'environnement Python), avec les deux modèles :
+  ```
+  ollama pull qwen2.5:7b
+  ollama pull nomic-embed-text
+  ```
+- [`uv`](https://docs.astral.sh/uv/) pour la gestion des dépendances Python
+- Un projet [Supabase](https://supabase.com/) avec l'extension `pgvector` activée (voir `.env.example` pour les variables attendues)
 
-si les conteneurs docker sont demarre:
-langfuse => http://localhost:3000/
-streamlit => http://localhost:8501/
-fast api => https://localhost:8000/docs
-prometheus => http://localhost:9092
-grafana => http://localhost:3002 
-uptime kuma => http://localhost:3003
+## 🚀 Démarrage
 
-si non  
+```bash
+# Build + démarrage de tous les services (mode dev : ports exposés, logs en volume)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
+# Vérification
+docker ps
 ```
+
+Pour tout arrêter proprement :
+
+```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml down
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
-ou peut être :
+Les URLs de chaque service une fois démarré sont listées dans la section *URLs utiles* ci-dessus.
+
+## 🔒 Sécurité — Communication chiffrée (TLS)
+
+La communication Streamlit → API Intelligence est chiffrée via un certificat auto-signé (suffisant pour le développement) :
+
 ```
-docker compose down
-docker compose up -d --build
-```
-
-verification  => ` docker ps `
-
-
-## 🔒 Phase 7.3 — Communication chiffrée (TLS/HTTPS)
-
-### Architecture
-```
-Navigateur (HTTP)
-    ↓
-Streamlit Frontend (http://localhost:8501)
-    ↓ HTTPS + certificat auto-signé
-Intelligence API (https://horragor-ia:8000)
+Navigateur (HTTP) → Streamlit (8501) → HTTPS + certificat auto-signé → Intelligence API (8000)
 ```
 
+Génération du certificat (`certs/cert.pem` + `certs/key.pem`, valides pour `localhost` et les domaines internes Docker) :
 
-### Certificats
-
-- **Développement** : Certificat auto-signé généré automatiquement
-  - Généré par : `scripts/generate_cert.py`
-  - Stocké dans : `certs/cert.pem` + `certs/key.pem`
-  - Valide pour : localhost + domaines internes Docker
-
-- **Production** : Remplacer par un vrai certificat (Let's Encrypt, etc.)
-  ```bash
-  # Générer via certbot/acme
-  certbot certonly --standalone -d horragor.example.com
-  cp /etc/letsencrypt/live/horragor.example.com/fullchain.pem certs/cert.pem
-  cp /etc/letsencrypt/live/horragor.example.com/privkey.pem certs/key.pem
-
-### Configuration
-#### Frontend (app_frontend.py)
-```
-SSL_VERIFY = os.getenv("SSL_CERT_PATH", "/app/certs/cert.pem")
-# httpx utilise ce certificat pour faire confiance à l'API
+```bash
+uv run python scripts/generate_cert.py
 ```
 
-#### API Intelligence (intelligence_api.Dockerfile)
-```
-# Uvicorn lance en HTTPS
-CMD ["uvicorn", "main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--ssl-keyfile=/app/certs/key.pem", \
-     "--ssl-certfile=/app/certs/cert.pem"]
-```
+En production, ces fichiers doivent être remplacés par un certificat réel (Let's Encrypt/`certbot` ou équivalent) — voir les commentaires du script pour le détail.
 
-#### docker-compose.yml
-```
-services:
-  horragor-ia:
-    image: horragor-intelligence-api:1.0
-    container_name: horragor-ia
-    ports:
-      - "8000:8000"
-    environment:
-      - PYTHONUNBUFFERED=1
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-    volumes:
-      - ./intelligence_api:/app/intelligence_api
-      - ./src:/app/src
-      - ./data:/app/data
-      - ./certs:/app/certs  # ← Certificats en volume
-    networks:
-      - horragor_network
-    depends_on:
-      - horragor-data
+## 📚 Documentation technique (Sphinx)
 
-  horragor-front:
-    image: horragor-frontend:latest
-    container_name: horragor-front
-    ports:
-      - "8501:8501"
-    environment:
-      - API_BASE_URL=https://horragor-ia:8000  # ← HTTPS
-      - SSL_CERT_PATH=/app/certs/cert.pem      # ← Certificat
-      - PYTHONUNBUFFERED=1
-    volumes:
-      - ./app_frontend.py:/app/app_frontend.py
-      - ./src:/app/src
-      - ./certs:/app/certs  # ← Certificats en volume
-    networks:
-      - horragor_network
-    depends_on:
-      - horragor-ia
+La documentation technique complète du projet (doc API automatique des deux services, schéma relationnel de la base, cartographie du graphe multi-agent) est générée avec Sphinx dans `docs/`.
 
-networks:
-  horragor_network:
-    driver: bridge
+```bash
+# Régénérer les pages dépendantes du code/de la base avant de builder (si le schéma ou le graphe ont changé)
+uv run python scripts/generate_db_schema_doc.py
+uv run python scripts/generate_graph_doc.py
+
+# Build HTML
+uv run sphinx-build -b html docs/source docs/build/html
 ```
 
-### Génération des certificats
-#### Script — scripts/generate_cert.py
-```
-#!/usr/bin/env python3
-"""
-Générer un certificat auto-signé pour développement.
-Utilisation : python scripts/generate_cert.py
-"""
-
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
-
-try:
-    from cryptography import x509
-    from cryptography.x509.oid import NameOID, ExtensionOID
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.backends import default_backend
-except ImportError:
-    print("❌ Erreur : cryptography non installé")
-    print("   Installez avec : pip install cryptography")
-    exit(1)
-
-
-def generate_self_signed_cert(cert_path: str, key_path: str, days: int = 365):
-    """
-    Générer un certificat auto-signé et une clé privée.
-    
-    Args:
-        cert_path: Chemin de sortie pour le certificat (.pem)
-        key_path: Chemin de sortie pour la clé privée (.pem)
-        days: Validité du certificat (par défaut 365 jours)
-    """
-    
-    # Créer le répertoire s'il n'existe pas
-    cert_dir = Path(cert_path).parent
-    cert_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"🔐 Génération du certificat auto-signé...")
-    print(f"   Répertoire : {cert_dir}")
-    
-    # Générer la clé privée
-    print("   → Génération de la clé RSA 2048 bits...")
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-        backend=default_backend()
-    )
-    
-    # Créer le sujet et l'émetteur (self-signed)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, "FR"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "IDF"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, "Paris"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Horragor Dev"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "horragor-ia"),
-    ])
-    
-    # Construire le certificat
-    print("   → Construction du certificat X.509...")
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(private_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.utcnow())
-        .not_valid_after(datetime.utcnow() + timedelta(days=days))
-        .add_extension(
-            x509.SubjectAlternativeName([
-                x509.DNSName("localhost"),
-                x509.DNSName("horragor-ia"),
-                x509.DNSName("127.0.0.1"),
-            ]),
-            critical=False,
-        )
-        .add_extension(
-            x509.BasicConstraints(ca=False, path_length=None),
-            critical=True,
-        )
-        .sign(private_key, hashes.SHA256(), default_backend())
-    )
-    
-    # Sauvegarder la clé privée
-    print(f"   → Sauvegarde de la clé privée : {key_path}")
-    with open(key_path, "wb") as f:
-        f.write(private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
-    os.chmod(key_path, 0o600)  # Permissions restrictives
-    
-    # Sauvegarder le certificat
-    print(f"   → Sauvegarde du certificat : {cert_path}")
-    with open(cert_path, "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.PEM))
-    
-    print(f"\n✅ Certificat généré avec succès !")
-    print(f"   Valide pour : {days} jours")
-    print(f"   Domaines : localhost, horragor-ia, 127.0.0.1")
-    print(f"\n📝 À intégrer dans :")
-    print(f"   - intelligence_api.Dockerfile")
-    print(f"   - docker-compose.yml (volumes)")
-    print(f"   - app_frontend.py (SSL_CERT_PATH)")
-
-
-if __name__ == "__main__":
-    cert_path = Path(__file__).parent.parent / "certs" / "cert.pem"
-    key_path = Path(__file__).parent.parent / "certs" / "key.pem"
-    
-    generate_self_signed_cert(str(cert_path), str(key_path))
-```
-
-#### Lancer la génération
-```
-# Installation de la dépendance
-uv pip install cryptography
-
-# Générer les certificats
-python scripts/generate_cert.py
-```
-
-### Tests
-```
-# Vérifier que l'API est en HTTPS
-docker logs horragor-ia | grep "https://"
-
-# Résultat attendu :
-INFO:     Uvicorn running on https://0.0.0.0:8000 (Press CTRL+C to quit)
-
-# Vérifier les requêtes authentifiées
-docker logs horragor-ia | grep "POST /auth/login"
-
-# Résultat attendu :
-INFO:     172.21.0.4:57100 - "POST /auth/login HTTP/1.1" 200 OK
-✅ Utilisateur authentifié : admin
-
-# Vérifier les requêtes au chat
-docker logs horragor-ia | grep "POST /chat"
-
-# Résultat attendu :
-INFO:     172.21.0.4:57146 - "POST /chat HTTP/1.1" 200 OK
-
-# Tester manuellement
-curl -X POST https://localhost:8000/auth/login \
-  --cacert certs/cert.pem \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"motdepasse123"}'
-```
+La doc est ensuite consultable dans `docs/build/html/index.html`.
