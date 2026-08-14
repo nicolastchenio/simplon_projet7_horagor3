@@ -56,6 +56,7 @@ Le réseau Docker `horragor_net` isole `data_api` de l'extérieur : seule `intel
 - **Base de données** : Supabase (PostgreSQL + extension pgvector)
 - **Authentification** : JWT (access + refresh tokens), bcrypt
 - **Observabilité** : Langfuse (traces LLM), Loguru (logs JSON structurés), Prometheus + Grafana + Uptime Kuma
+- **Tests** : pytest, pytest-cov (couverture ≥80 % imposée sur les 2 API + l'UI)
 - **Documentation** : Sphinx (autodoc, napoleon, myst-parser, mermaid)
 - **Conteneurisation** : Docker Compose (réseau `bridge` dédié)
 - **Packaging** : `uv`
@@ -82,9 +83,9 @@ horragor-project/
 │   └── routers/
 │       └── films.py                 # Endpoints /films (recherche, fuzzy, détail, similarité pgvector)
 ├── docker/                          # Dockerfiles des 3 services applicatifs
-│   ├── data_api.Dockerfile
-│   ├── frontend.Dockerfile
-│   └── intelligence_api.Dockerfile
+│   ├── data_api.Dockerfile          # Image du service Données (port 8001)
+│   ├── frontend.Dockerfile          # Image du frontend Streamlit (port 8501)
+│   └── intelligence_api.Dockerfile  # Image du service Intelligence (port 8000, HTTPS)
 ├── docs/                            # Documentation technique Sphinx (Phase 9)
 │   └── source/
 │       ├── conf.py                  # autodoc, napoleon, myst_parser, sphinxcontrib.mermaid
@@ -118,19 +119,32 @@ horragor-project/
 │   ├── models/
 │   │   └── state.py                 # AgentState — mémoire commune partagée
 │   ├── observability/
-│   │   ├── logging_config.py
-│   │   ├── json_serializer.py
+│   │   ├── logging_config.py        # Config Loguru (JSON, rotation, interception stdlib)
+│   │   ├── json_serializer.py       # Aplatit les logs Loguru en JSON pour le monitoring
 │   │   └── langfuse_client.py
 │   └── tools/
 │       ├── rag_tool.py              # FAISS + appels HTTP vers data-api
 │       ├── scraper_tool.py          # Enrichissement Wikipédia (API MediaWiki)
 │       └── horror_tools.py          # Âge du film, simulateur de survie
+├── tests/                           # Suite de tests (Phase 10.1/10.2/10.3)
+│   ├── test_auth_endpoints.py       # Endpoints /auth/login, /auth/refresh
+│   ├── test_data_api_app.py         # App data-api réelle (health, config, models, /metrics)
+│   ├── test_data_api_database.py    # Wrapper de logging PostgreSQL (_LoggingCursor/Connection)
+│   ├── test_data_api_films.py       # Endpoints /films/* (BDD mockée)
+│   ├── test_frontend.py             # UI Streamlit (JWT, auth, chat, pages)
+│   ├── test_horror_tools.py         # calculate_movie_age, horror_survival_simulator
+│   ├── test_integration_chat.py     # Flux RAG→Narration / RAG→Scraper→Narration, auth complète
+│   ├── test_nodes.py                # rag_node, scraper_node, narration_node (outils mockés)
+│   ├── test_rag_tool.py             # FAISS local + appels HTTP data-api
+│   ├── test_router.py               # route_after_rag (routeur déterministe)
+│   ├── test_scraper_tool.py         # Scraping Wikipédia (API MediaWiki mockée)
+│   └── test_security.py             # bcrypt + cycle de vie JWT
 ├── app_frontend.py                  # UI Streamlit (Phase 5)
-├── docker-compose.yml                # Orchestration des services (prod-like)
-├── docker-compose.dev.yml            # Override dev (ports exposés, volumes de logs)
-├── prometheus.yml                    # Configuration du scraping Prometheus
-├── pyproject.toml                    # Dépendances et métadonnées (uv)
-└── .env.example                      # Modèle de configuration (sans secrets)
+├── docker-compose.yml               # Orchestration des services (prod-like)
+├── docker-compose.dev.yml           # Override dev (ports exposés, volumes de logs)
+├── prometheus.yml                   # Configuration du scraping Prometheus
+├── pyproject.toml                   # Dépendances et métadonnées (uv)
+└── .env.example                     # Modèle de configuration (sans secrets)
 ```
 
 ## ✅ Prérequis
@@ -192,3 +206,13 @@ uv run sphinx-build -b html docs/source docs/build/html
 ```
 
 La doc est ensuite consultable dans `docs/build/html/index.html`.
+
+## 🧪 Tests & couverture
+
+La suite de tests (217 tests) couvre les deux API et l'interface Streamlit, avec un seuil de couverture minimal de 80 % imposé via `pytest-cov` (`fail_under` dans `pyproject.toml`).
+
+```bash
+uv run pytest --cov --cov-report=term-missing
+```
+
+Couverture actuelle : **~96 %** (`src` ~94 %, `data_api` ~99 %, `app_frontend.py` ~99 %).

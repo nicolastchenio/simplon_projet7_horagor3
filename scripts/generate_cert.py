@@ -33,7 +33,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
-
 # Dossier de sortie des certificats (créé s'il n'existe pas)
 CERTS_DIR = Path(__file__).resolve().parent.parent / "certs"
 
@@ -71,10 +70,10 @@ def generate_self_signed_cert() -> None:
         .issuer_name(issuer)               # Auto-signé : émetteur = sujet
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
         .not_valid_after(
             # Validité : 1 an (largement suffisant pour une démo)
-            datetime.datetime.now(datetime.timezone.utc)
+            datetime.datetime.now(datetime.UTC)
             + datetime.timedelta(days=365)
         )
         # ── 5. Noms alternatifs (SAN) : indispensables pour la validation ──

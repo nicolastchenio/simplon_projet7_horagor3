@@ -3547,9 +3547,9 @@ Surveille les 3 GET /health (déjà présents depuis la Phase 4.3, y compris _st
       - Pas besoin d'ignorer TLS ici (HTTP simple, pas de certificat).
 
 
-## Phase 9 : Documentation Sphinx ##
+# Phase 9 : Documentation Sphinx #
 
-### 9.1 Setup Sphinx ###
+## 9.1 Setup Sphinx ##
 
 Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`).  
    - Installe le thème RTD et le support Markdown :
@@ -3571,7 +3571,7 @@ Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`).
       - changer html_theme = "alabaster" → "sphinx_rtd_theme"
       - configurer sys.path.insert(0, ...) vers la racine du projet pour qu'autodoc trouve src et data_api
 
-### 9.2 Contenu obligatoire ###
+## 9.2 Contenu obligatoire ##
 
 1. **Doc API automatisée** : pour les **deux** API (Données + Intelligence), via `autodoc` (`automodule::` sur `src.main`, `src.api.auth`, `data_api.main`, `data_api.routers.films`, etc.), on s'appuie sur les docstrings déjà rédigées en français dans le code.  
    La doc HTML est dans docs/build/html/index.html.
@@ -3594,27 +3594,175 @@ Initialise Sphinx dans `docs/` (`uv run sphinx-quickstart`).
 
 3. **Cartographie du graphe** : génère un schéma des nodes, du router et des edges conditionnelles via `graph.get_graph().draw_mermaid()` (texte Mermaid intégré nativement dans une page Sphinx, sans dépendance réseau ni Graphviz).
 
-
-### 9.3 Build ###
+## 9.3 Build ##
 
 Génère la documentation HTML finale (`uv run sphinx-build -b html docs/source docs/build/html`).
 
+# Phase 10 : Qualité, Tests & Gouvernance #
+
+## 10.5 GitHub Issues ##
+
+Crée un template d'issue dans `.github/ISSUE_TEMPLATE/bug_report.md` avec les champs : nœud concerné (RAG / Scraper / Narration), requête test, résultat attendu, résultat obtenu, logs Langfuse si applicable. Adopte la règle : chaque anomalie détectée = un ticket archivé avant correction.
+
+C'est un fichier Markdown avec un en-tête YAML, placé dans .github/ISSUE_TEMPLATE/, que GitHub reconnaît automatiquement. Quand quelqu'un clique sur "New Issue" sur le repo, au lieu d'une zone de texte vide, GitHub propose ce template pré-rempli avec les sections qu'on a définies — ça force à structurer le rapport de bug au lieu de laisser chacun écrire "ça marche pas" sans contexte.
+
+Structure technique :
+```
+---
+name: Bug Report
+about: Signaler une anomalie sur un agent HorRAGor
+title: "[BUG] "
+labels: bug
+---
+```
+
+Sections en Markdown normal...  
+Le bloc YAML (name, about, title, labels) configure comment ce template apparaît dans le menu "New Issue". Le reste est du Markdown classique, affiché tel quel dans le corps de l'issue à remplir.
+
+## 10.1 Tests unitaires ##
+- Teste chaque node indépendamment (mock des outils).
+- Teste le router avec des states variés (résultats riches vs résultats vides).
+- Teste les endpoints de `data_api` avec la BDD mockée.
+
+Structure proposée:
+
+```
+tests/
+├── conftest.py              # fixtures partagées (faux curseur/connexion PostgreSQL)
+├── test_router.py           # route_after_rag — pur, aucun mock
+├── test_nodes.py            # rag_node, scraper_node, narration_node — mocks
+├── test_horror_tools.py     # calculate_movie_age, horror_survival_simulator — purs
+├── test_security.py         # bcrypt/JWT (src/auth/security.py) — purs
+├── test_auth_endpoints.py   # /auth/login, /auth/refresh (TestClient, app minimale)
+└── test_data_api_films.py   # /films/search, /fuzzy, /{id}, /{id}/similar (TestClient + DB mockée)
+```
+
+Un petit ajout dans pyproject.toml ([tool.pytest.ini_options], pythonpath = ["."]) pour que pytest trouve src et data_api depuis n'importe quel répertoire d'exécution.
+
+Ce qu'on mocke, et pourquoi :
+
+```
+┌───────────────────────────┬──────────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────┐
+│       Fichier testé       │                        Ce qu'on mocke                        │                         Pourquoi                         │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│                           │                                                              │ Fonction 100 % déterministe, on lui passe des dict       │
+│ router.py                 │ Rien                                                         │ construits à la main (comme dans tes anciens tests       │
+│                           │                                                              │ jetables de Phase 3, mais formalisés en vrais tests      │
+│                           │                                                              │ pytest)                                                  │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ nodes.py (rag_node)       │ search_local_horror_lore, query_movie_metadata               │ Éviter tout appel FAISS/HTTP réel                        │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ nodes.py (scraper_node)   │ enrich_from_web                                              │ Éviter un vrai appel réseau à Wikipédia                  │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ nodes.py (narration_node) │ _get_narrator_llm (renvoie un faux LLM),                     │ Éviter tout appel Ollama réel ou requête pgvector        │
+│                           │ find_similar_horror_movies                                   │                                                          │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ horror_tools.py           │ Rien (sauf random.randint figé dans un seul test pour un     │ Fonctions pures                                          │
+│                           │ résultat déterministe)                                       │                                                          │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ security.py               │ Rien                                                         │ bcrypt/JWT sont déterministes avec une config donnée     │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│                           │ config.AUTH_USERNAME/AUTH_PASSWORD_HASH (monkeypatchés avec  │ On ne connaît pas le vrai mot de passe en clair de ton   │
+│ src/api/auth.py           │ un couple utilisateur/mot de passe de test, connu)           │ .env (seul le hash y est) — impossible de tester le      │
+│                           │                                                              │ login "correct" sans ça                                  │
+├───────────────────────────┼──────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────┤
+│ data_api/routers/films.py │ get_db_connection (fausse connexion/curseur renvoyant des    │ Éviter toute vraie requête Supabase                      │
+│                           │ lignes construites à la main)                                │                                                          │
+└───────────────────────────┴──────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────┘
+```
 
 
+## 10.2 Tests d'intégration ##
 
---------
-Pourquoi : le déploiement GitHub Pages (comme celui montré dans ton PDF de référence, page 7-8) ne dépend jamais d'un docs/build/ committé dans le dépôt. Le workflow GitHub Actions :
+- Lance l'API, envoie une requête et vérifie que le flux RAG → Narration ou RAG → Scraper → Narration fonctionne.
+- Teste le flux d'authentification complet (login / refresh / accès protégé).
 
-1. Checkout du code
-2. uv sync (installe Sphinx et les dépendances)
-3. uv run sphinx-build docs/source public — régénère le HTML à neuf, directement dans le runner CI
-4. Upload de ce HTML frais comme "Pages artifact"
-5. Déploiement vers GitHub Pages
+## 10.3 Couverture de tests ##
 
-Le HTML généré ne transite jamais par git commit — il est construit puis déployé dans la même exécution CI, sans jamais être versionné. docs/build/ (ou public/) dans .gitignore est donc exactement ce qu'il faut : les sources (docs/source/*.rst, les scripts générateurs, README.md) sont versionnées, le HTML généré ne l'est jamais — ni en local, ni en CI.
+Vise une couverture ≥ 80 % sur les deux API et l'UI (`pytest-cov`).
 
-C'est le même principe que data/faiss_index/*.faiss ou docs/build/html/* : artefact régénérable, jamais committé.
+Étape 1 — Config coverage (pyproject.toml)  
+Ajouter `[tool.coverage.run] ` (source = src, data_api, app_frontend.py) et `[tool.coverage.report] ` (fail_under = 80, exclusions type if __name__ == "__main__", pragma: no cover pour le code d'observabilité/infra difficilement testable). Aucun impact sur le code applicatif.
 
-Si tu veux ce workflow GitHub Pages, il faudra en plus :
-- Activer Pages dans les settings du repo (Build and deployment → GitHub Actions)
-- Ajouter .github/workflows/docs.yml (repris de ton PDF)
+Étape 2 — Mesure de référence (baseline)  
+Lancer ` uv run pytest --cov --cov-report=term-missing ` pour obtenir les vrais pourcentages par fichier (lecture seule, aucune modification). Ça remplace mes hypothèses par des chiffres réels avant de décider quoi combler.
+
+Étape 3 — Combler les trous identifiés, probablement :  
+  - Tests unitaires pour rag_tool.py et scraper_tool.py (mock aux frontières FAISS/httpx/requests, comme documenté en 10.1).
+  - Test léger pour pipeline.py (le graphe compile, contient les 3 nœuds, edges corrects).
+  - Tests pour app_frontend.py via streamlit.testing.v1.AppTest (API officielle de test Streamlit, pas de navigateur nécessaire) — à vérifier que la version de Streamlit installée la supporte.
+  - Compléments ciblés sur src/main.py si des branches d'erreur ne sont pas couvertes par test_integration_chat.py.
+
+Étape 4 — Re-mesure finale  
+Relancer ` pytest --cov ` avec fail_under=80 actif pour valider objectivement l'atteinte du seuil sur les 2 API + l'UI.
+
+Note : Les modules observability/* (logging_config, json_serializer, langfuse_client — Loguru/Langfuse) représentent ~236 lignes peu couvertes. Ce sont majoritairement des wrappers autour de frameworks externes (formatage de logs, envoi de traces). J'ai decider de les exclure du périmètre mesuré (omit dans [tool.coverage.run]) — cohérent avec l'esprit "on ne teste pas la plomberie qui ne peut pas casser côté métier", mais réduit artificiellement le dénominateur.
+
+## 10.4 Pipeline CI/CD ##
+
+Mets en place un pipeline (ex. GitHub Actions) qui lance : lint, tests + couverture, build des images Docker, à chaque push/PR.
+
+Structure du pipeline (.github/workflows/ci.yml)
+- Déclencheurs : push (toutes branches) et pull_request (vers main).
+- Job lint : uv run ruff check .
+- Job test (en parallèle du lint) : uv run pytest --cov --cov-report=term-missing (le seuil fail_under=80 déjà configuré fait échouer le job si la couverture retombe sous 80 %).
+- Job build (needs: [lint, test], ne se lance que si les deux précédents passent) : build des 3 images Docker (data_api, intelligence_api, frontend) via docker build -f docker/xxx.Dockerfile ., sans push vers un registre (non demandé par le plan).
+- Utilise l'action officielle astral-sh/setup-uv pour l'installation d'uv avec cache.
+
+Les etapes :
+- Installer ruff car aucun outil de lint n'est configuré dans le projet actuellement. ajouter en dépendance dev via ` uv add --dev ruff `.
+
+    J'exclus ces deux règles du lint :
+    ```
+    [tool.ruff.lint]
+    select = ["E", "F", "I", "UP"]
+    ignore = ["E501", "E402"]
+    ```
+
+    car :
+    - E501 (123×) — lignes trop longues. Le code contient beaucoup de f-strings/docstrings en français assez longs (logs Loguru détaillés notamment). Les corriger impliquerait de reformater une grande partie du codebase — hors périmètre d'une mise en place de CI, et purement cosmétique.
+    - E402 (12×) — imports pas en tête de fichier. Vérifié sur data_api/main.py : c'est volontaire (setup_logging() doit s'exécuter avant l'import des routers pour capter toute l'initialisation — commenté explicitement dans le fichier). Le corriger casserait ce comportement voulu.
+
+- Les tests nécessitent JWT_SECRET_KEY et AUTH_PASSWORD_HASH (sinon src/config.py lève une erreur au chargement) — il n'y a pas de secret réel requis pour les tests (ils sont mockés), donc je fixe des valeurs factices directement dans le workflow.  
+    Voici le workflow que je propose pour .github/workflows/ci.yml (j'ai vérifié : uv.lock est bien versionné, donc uv sync --locked est fiable ; les 3 Dockerfiles se build sans secret) :
+    ```
+    name: CI
+
+    on:
+    push:
+    pull_request:
+        branches: [main]
+
+    jobs:
+    lint:
+        runs-on: ubuntu-latest
+        steps:
+
+
+    test:
+        runs-on: ubuntu-latest
+        env:
+        JWT_SECRET_KEY: ci_test_secret_key
+        AUTH_PASSWORD_HASH: ci_test_password_hash_placeholder
+        steps:
+        - uses: actions/checkout@v4
+
+        - run: uv run pytest --cov --cov-report=term-missing
+
+    build:
+        runs-on: ubuntu-latest
+        needs: [lint, test]
+        steps:
+        - uses: actions/checkout@v4
+    er/data_api.Dockerfile -t horragor-data-api:ci .
+        - run: docker build -f docker/intelligence_api.Dockerfile -t horragor-intelligence-api:ci .
+        - run: docker build -f docker/frontend.Dockerfile -t horragor-frontend:ci .
+    ```
+
+    Points notés :
+    - JWT_SECRET_KEY/AUTH_PASSWORD_HASH sont des valeurs factices e, tout est mocké dans les tests).
+    - build ne se lance que si lint et test réussissent (needs:), pas de push vers un registre (non demandé).
+    - fail_under=80 déjà actif dans pyproject.toml fait échouer test si la couverture repasse sous 80 %.
+
+- Le pipeline ne sera réellement validé qu'au premier push vers GitHub 
+

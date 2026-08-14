@@ -41,15 +41,13 @@ from typing import Any
 from loguru import logger
 
 from src.config import (
-    LOG_LEVEL,
     LOG_DIR,
-    LOG_JSON,
-    LOG_FILE_MAX_BYTES,
     LOG_FILE_BACKUP_COUNT,
+    LOG_FILE_MAX_BYTES,
+    LOG_JSON,
+    LOG_LEVEL,
 )
-
 from src.observability.json_serializer import flatten_loguru_record
-
 
 #: Chemin canonique du fichier de log (dérivé de LOG_DIR).
 LOG_FILE_PATH: Path = LOG_DIR / "intelligence_api.log"

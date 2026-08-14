@@ -10,7 +10,6 @@ et pré-enrichi pour les outils de monitoring (Uptime Kuma, Langfuse, etc.)
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 
@@ -173,7 +172,7 @@ def process_loguru_json_file(input_path: str, output_path: str) -> None:
     ✅ 4 logs traités → logs/intelligence_api.log.processed.json
     """
     count = 0
-    with open(input_path, "r", encoding="utf-8") as f_in, open(
+    with open(input_path, encoding="utf-8") as f_in, open(
         output_path, "w", encoding="utf-8"
     ) as f_out:
         for line in f_in:

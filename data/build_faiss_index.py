@@ -36,7 +36,8 @@ import psycopg2.extensions
 from dotenv import load_dotenv
 from langchain_ollama import OllamaEmbeddings
 from loguru import logger
-from src.config import OLLAMA_EMBEDDING_MODEL, OLLAMA_BASE_URL
+
+from src.config import OLLAMA_BASE_URL, OLLAMA_EMBEDDING_MODEL
 
 # -----------------------------------------------------------------------------
 # Constantes

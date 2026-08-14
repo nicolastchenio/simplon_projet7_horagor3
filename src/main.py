@@ -6,18 +6,21 @@ Charge le graphe LangGraph compilé au démarrage et expose un endpoint /chat.
 """
 
 from __future__ import annotations
-from datetime import datetime
+
 import asyncio
-import uuid
 import time
-from langchain_core.messages import HumanMessage
+import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
-from fastapi import FastAPI, HTTPException, status, Depends, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Any
+
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from langchain_core.messages import HumanMessage
 from loguru import logger
 from prometheus_fastapi_instrumentator import Instrumentator
+from pydantic import BaseModel, Field
 
 # ─────────────────────────────────────────────────────────────────
 # Configuration du logging Loguru — en premier pour capter toute
@@ -178,7 +181,7 @@ async def log_requests_middleware(request: Request, call_next):
     start_time = time.perf_counter()
     try:
         response = await call_next(request)
-    except Exception as exc:
+    except Exception:
         logger.bind(request_id=request_id, client_ip=client_ip).exception(
             f"✗ Exception durant le traitement de {request.method} {request.url.path}"
         )
@@ -344,14 +347,12 @@ async def chat_endpoint(
     faiss_hits = rag_results.get("faiss", {}).get("hits", []) if isinstance(rag_results, dict) else []
     logger.bind(request_id=request_id).debug(f"[chat_endpoint] Sources FAISS extraites : {len(faiss_hits)}")
     for hit in faiss_hits:
-        meta = hit.get("metadata", {})
         sources.append(
             {
                 "type": "faiss",
                 "score": hit.get("score"),
-                "title": meta.get("titre"),
-                "year": meta.get("annee"),
-                "preview": (hit.get("chunk") or "")[:200],
+                "title": hit.get("source"),
+                "preview": (hit.get("text") or "")[:200],
             }
         )
 
