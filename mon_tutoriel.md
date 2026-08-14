@@ -3681,6 +3681,23 @@ Ce qu'on mocke, et pourquoi :
 
 Vise une couverture ≥ 80 % sur les deux API et l'UI (`pytest-cov`).
 
+Étape 1 — Config coverage (pyproject.toml)  
+Ajouter `[tool.coverage.run] ` (source = src, data_api, app_frontend.py) et `[tool.coverage.report] ` (fail_under = 80, exclusions type if __name__ == "__main__", pragma: no cover pour le code d'observabilité/infra difficilement testable). Aucun impact sur le code applicatif.
+
+Étape 2 — Mesure de référence (baseline)  
+Lancer ` uv run pytest --cov --cov-report=term-missing ` pour obtenir les vrais pourcentages par fichier (lecture seule, aucune modification). Ça remplace mes hypothèses par des chiffres réels avant de décider quoi combler.
+
+Étape 3 — Combler les trous identifiés, probablement :  
+  - Tests unitaires pour rag_tool.py et scraper_tool.py (mock aux frontières FAISS/httpx/requests, comme documenté en 10.1).
+  - Test léger pour pipeline.py (le graphe compile, contient les 3 nœuds, edges corrects).
+  - Tests pour app_frontend.py via streamlit.testing.v1.AppTest (API officielle de test Streamlit, pas de navigateur nécessaire) — à vérifier que la version de Streamlit installée la supporte.
+  - Compléments ciblés sur src/main.py si des branches d'erreur ne sont pas couvertes par test_integration_chat.py.
+
+Étape 4 — Re-mesure finale  
+Relancer ` pytest --cov ` avec fail_under=80 actif pour valider objectivement l'atteinte du seuil sur les 2 API + l'UI.
+
+Note : Les modules observability/* (logging_config, json_serializer, langfuse_client — Loguru/Langfuse) représentent ~236 lignes peu couvertes. Ce sont majoritairement des wrappers autour de frameworks externes (formatage de logs, envoi de traces). J'ai decider de les exclure du périmètre mesuré (omit dans [tool.coverage.run]) — cohérent avec l'esprit "on ne teste pas la plomberie qui ne peut pas casser côté métier", mais réduit artificiellement le dénominateur.
+
 ## 10.4 Pipeline CI/CD ##
 
 Mets en place un pipeline (ex. GitHub Actions) qui lance : lint, tests + couverture, build des images Docker, à chaque push/PR.
@@ -3705,4 +3722,3 @@ C'est le même principe que data/faiss_index/*.faiss ou docs/build/html/* : arte
 Si tu veux ce workflow GitHub Pages, il faudra en plus :
 - Activer Pages dans les settings du repo (Build and deployment → GitHub Actions)
 - Ajouter .github/workflows/docs.yml (repris de ton PDF)
-

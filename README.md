@@ -56,6 +56,7 @@ Le réseau Docker `horragor_net` isole `data_api` de l'extérieur : seule `intel
 - **Base de données** : Supabase (PostgreSQL + extension pgvector)
 - **Authentification** : JWT (access + refresh tokens), bcrypt
 - **Observabilité** : Langfuse (traces LLM), Loguru (logs JSON structurés), Prometheus + Grafana + Uptime Kuma
+- **Tests** : pytest, pytest-cov (couverture ≥80 % imposée sur les 2 API + l'UI)
 - **Documentation** : Sphinx (autodoc, napoleon, myst-parser, mermaid)
 - **Conteneurisation** : Docker Compose (réseau `bridge` dédié)
 - **Packaging** : `uv`
@@ -125,6 +126,19 @@ horragor-project/
 │       ├── rag_tool.py              # FAISS + appels HTTP vers data-api
 │       ├── scraper_tool.py          # Enrichissement Wikipédia (API MediaWiki)
 │       └── horror_tools.py          # Âge du film, simulateur de survie
+├── tests/                           # Suite de tests (Phase 10.1/10.2/10.3)
+│   ├── test_auth_endpoints.py       # Endpoints /auth/login, /auth/refresh
+│   ├── test_data_api_app.py         # App data-api réelle (health, config, models, /metrics)
+│   ├── test_data_api_database.py    # Wrapper de logging PostgreSQL (_LoggingCursor/Connection)
+│   ├── test_data_api_films.py       # Endpoints /films/* (BDD mockée)
+│   ├── test_frontend.py             # UI Streamlit (JWT, auth, chat, pages)
+│   ├── test_horror_tools.py         # calculate_movie_age, horror_survival_simulator
+│   ├── test_integration_chat.py     # Flux RAG→Narration / RAG→Scraper→Narration, auth complète
+│   ├── test_nodes.py                # rag_node, scraper_node, narration_node (outils mockés)
+│   ├── test_rag_tool.py             # FAISS local + appels HTTP data-api
+│   ├── test_router.py               # route_after_rag (routeur déterministe)
+│   ├── test_scraper_tool.py         # Scraping Wikipédia (API MediaWiki mockée)
+│   └── test_security.py             # bcrypt + cycle de vie JWT
 ├── app_frontend.py                  # UI Streamlit (Phase 5)
 ├── docker-compose.yml               # Orchestration des services (prod-like)
 ├── docker-compose.dev.yml           # Override dev (ports exposés, volumes de logs)
@@ -192,3 +206,13 @@ uv run sphinx-build -b html docs/source docs/build/html
 ```
 
 La doc est ensuite consultable dans `docs/build/html/index.html`.
+
+## 🧪 Tests & couverture
+
+La suite de tests (217 tests) couvre les deux API et l'interface Streamlit, avec un seuil de couverture minimal de 80 % imposé via `pytest-cov` (`fail_under` dans `pyproject.toml`).
+
+```bash
+uv run pytest --cov --cov-report=term-missing
+```
+
+Couverture actuelle : **~96 %** (`src` ~94 %, `data_api` ~99 %, `app_frontend.py` ~99 %).
