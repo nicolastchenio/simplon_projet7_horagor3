@@ -21,6 +21,7 @@ setup_logging()
 
 from fastapi import FastAPI
 from loguru import logger
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from data_api.routers import films
 
@@ -43,3 +44,9 @@ def health_check():
     """
     logger.debug("[health_check] Health check appelé")
     return {"status": "ok", "service": "data-api"}
+
+
+# Expose GET /metrics (Phase 8.3) pour le scraping Prometheus.
+# /health est exclu du comptage pour ne pas polluer les métriques
+# avec le bruit des pings répétés d'Uptime Kuma.
+Instrumentator(excluded_handlers=["/health"]).instrument(app).expose(app)

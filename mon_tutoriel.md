@@ -3397,4 +3397,151 @@ Appel de setup_logging() tout en haut du fichier, avant l'import de data_api.rou
 
 8) actions point 8 :Infrastructure 
 
-j'ajoute volumes: - ./logs:/app/logs aux 3 services (data-api, intelligence-api, frontend) dans docker-compose.dev.yml — confirmé que les 3 services utilisent déjà LOG_DIR=/app/logs via .env.docker, donc le montage rendra directement visibles data_api.log, intelligence_api.log et frontend.log sur ton PC dans ./logs/.
+    j'ajoute volumes: 
+    - ./logs:/app/logs aux 3 services (data-api, intelligence-api, frontend) dans docker-compose.dev.yml — confirmé que les 3 services utilisent déjà LOG_DIR=/app/logs via .env.docker, donc le montage rendra directement visibles data_api.log, intelligence_api.log et frontend.log sur mon PC dans ./logs/.
+
+## 8.3 Prometheus + Grafana + Uptime Kuma #
+
+### 1. Instrumentation des 2 API (code) ###
+1. Dépendance (pyproject.toml)  
+Ajouter prometheus-fastapi-instrumentator via uv add prometheus-fastapi-instrumentator (une seule commande, pas de code).
+
+2. data_api/main.py
+   - Import (après les imports existants, ligne 22-25) :  
+        from prometheus_fastapi_instrumentator import Instrumentator
+
+   - Activation (en fin de fichier, après le bloc health_check, ligne 45) :  
+   Instrumentator().instrument(app, excluded_handlers=["/health"]).expose(app)
+
+   - Décisions prisent pour ce fichier :
+     - /health exclu des métriques : Uptime Kuma va le pinguer en boucle, l'exclure évite de polluer le compteur de requêtes/latence sur Grafana avec du bruit de monitoring.
+     - /metrics non protégé par JWT : cohérent avec /health qui n'est déjà pas protégé, et data-api n'a de toute façon aucun port publié vers l'hôte (§ docker-compose.yml) — donc /metrics reste inaccessible depuis ton PC, seul Prometheus (sur le réseau interne) pourra le scraper.
+     - Ça enregistre automatiquement un GET /metrics qui expose : nb requêtes par route/méthode/code, histogramme de latence, requêtes en cours. Aucune métrique à coder à la main.
+
+3. src/main.py
+- Même import, même ligne, ajoutée en fin de fichier (après health_check, ligne ~406) — ainsi elle s'applique une fois toutes les routes (/chat, /health, /auth/...) déjà enregistrées.
+
+### 2. Prometheus ###
+Scrape intelligence-api:8000/metrics et data-api:8001/metrics sur le réseau interne, via un fichier prometheus/prometheus.yml.
+
+Intelligence-api tourne en HTTPS (--ssl-keyfile/--ssl-certfile, Phase 7.3) alors que data-api est en HTTP simple. Ça change la config Prometheus, sinon le scrape de l'API Intelligence échouerait silencieusement
+
+1. prometheus.yml (nouveau fichier, config du scraper)
+
+2. Nouveau service (prometheus) dans docker-compose.yml
+   - Image officielle publique (pas de build:, pas de pull_policy: never — contrairement aux 3 services applicatifs) : Docker doit pouvoir la télécharger.
+   - Port 9090 publié directement → on pourra ouvrir http://localhost:9092 pour voir les targets et faire des requêtes PromQL.
+   - Volume nommé prometheus_data pour persister les données entre docker compose down/up (à déclarer en bas du fichier, section volumes: — nouvelle section à ajouter).
+
+ Tester (docker compose up -d --build + vérifier les targets sur http://localhost:9092/targets),
+
+=> conteneur stable, dashboard accessible sur http://localhost:9092, les 2 API remontent leurs métriques (requêtes, latences, codes de statut), /health exclu du bruit.
+
+### 3. Grafana ###
+Datasource Prometheus + un dashboard minimal (requêtes/sec, latence, erreurs)
+
+1. Fichier de provisioning — grafana/provisioning/datasources/datasource.yml
+
+    C'est Grafana lui-même qui impose ce chemin (/etc/grafana/provisioning/datasources/) pour l'auto-configuration au démarrage. Un seul fichier dedans.
+    Ça évite de configurer la datasource manuellement à chaque docker compose down/up.
+
+2. Dashboard : pas de provisioning par fichier JSON
+Le dashboard (requêtes/sec, latence, erreurs — panels PromQL simples type rate(http_requests_total[1m])) sera creer à la main dans l'UI après le premier
+démarrage. Si l'on préfère un fichier JSON peut etre ajouter juste un fichier dansgrafana/provisioning/dashboards/ qui creer le dashborad et que Grafana chargera automatiquement au démarrage (zéro clic)
+
+3. Nouveau service (grafana) dans docker-compose.yml
+  grafana:
+   - Port hôte 3002 → 3000 interne au conteneur. Pas de conflit avec Langfuse (déjà sur 3000 côté hôte) : les deux 3000 sont internes à des conteneurs différents, seul le mapping hôte compte.
+   - Volume nommé grafana_data à ajouter à la section volumes: existante (avec prometheus_data).
+
+4. Executer ` docker compose up -d ` pour démarrer Grafana.
+    Grafana tourne sur http://localhost:3002, connecté à Prometheus sans configuration manuelle.
+
+5.  création du dashboard manuel dans l'UI  
+    Se connecter avec  (admin/admin)
+    
+    Étape 1 — Créer le dashboard
+    1. Clique sur Dashboards dans le menu de gauche.
+    2. En haut à droite, clique sur New → New dashboard.
+    3. Clique sur Add visualization.
+    4. Une fenêtre te demande la source de données → choisis Prometheus.
+
+    Panel 1 — Requêtes par seconde
+    1. Dans la zone de requête en bas, il y a un sélecteur de mode (souvent deux boutons "Builder" / "Code", parfois une icône </>). Clique sur "Code" pour écrire la requête PromQL directement en texte.
+    2. Colle cette requête :
+    sum(rate(http_requests_total[1m])) by (job)
+    3. Appuie sur Shift+Enter (ou clique ailleurs) pour exécuter — le graphique en haut doit se remplir avec 2 courbes (une par job : data-api et intelligence-api).
+    4. À droite, dans "Panel options", remplis le champ Title avec : Requêtes par seconde
+
+    Panel 1 terminé. Maintenant :
+    1. En haut à droite de l'éditeur de panel, clique sur "Apply" (ou l'icône ✓ / coche) pour valider ce panel et revenir au dashboard.
+    2. Tu devrais voir ton dashboard avec le premier graphique "Requêtes par seconde" affiché.
+    3. Cherche un bouton "+ Add" (en haut du dashboard) → choisis "Visualization" pour créer le 2ᵉ panel (latence).
+
+    Panel 2 — Latence (p95)
+    1. Passe en mode Code (comme précédemment).
+    2. Colle cette requête :
+    histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, job))
+    2. Ça calcule le 95ᵉ centile de latence par API : 95 % des requêtes répondent en dessous de cette valeur.
+    3. Garde le type de visualisation Time series.
+    4. Dans Panel options (à droite), mets le titre : Latence p95 (secondes)
+    5. Clique sur Apply.
+
+    Panel  3ᵉ et dernier panel.
+
+    1. Clique à nouveau sur "+ Add" → "Visualization".
+    2. Mode Code, requête :
+    sum(rate(http_requests_total{status=~"5.."}[1m])) by (job)
+    2. Ça compte le taux d'erreurs serveur (5xx) par seconde, par API. Si tout va bien, la courbe sera à zéro (pas d'erreur) — c'est normal et attendu.
+    3. Type de visualisation : Time series.
+    4. Titre : Erreurs 5xx / sec
+    5. Apply.
+
+    Sauvegarde du dashboard
+    1. En haut à droite du dashboard, clique sur l'icône disquette (💾) ou le bouton "Save dashboard".
+    2. Une fenêtre demande un titre → mets par exemple : HorRAGor - Vue d'ensemble
+    3. Clique sur Save.
+
+### 4. Uptime Kuma ###
+Surveille les 3 GET /health (déjà présents depuis la Phase 4.3, y compris _stcore/health pour Streamlit) — se configure surtout via son UI après démarrage, peu de fichiers à écrire.
+
+1. Ajouter le service dans docker-compose.yml :
+   - ajout de uptime_kuma_data: dans la section volumes: en bas du fichier.
+   Points à noter :
+   - Image officielle publique (comme Prometheus/Grafana), pas de build.
+   - Port 3003 publié vers l'hôte → UI accessible sur http://localhost:3003.
+   - Doit être sur horragor-net pour joindre data-api:8001 et int pas de port publié vers l'hôte — Uptime Kuma doit passer parle réseau interne.
+
+2. Configuration via l'UI (pas de fichier, pas de provisioning) :
+    Après docker compose up -d :
+    1. Première visite → création du compte admin (admin / admin974).
+    2. Créer 3 monitors type HTTP(s) :
+    - Data API → http://data-api:8001/health
+    - Intelligence API → https://intelligence-api:8000/health — cocher "Ignore TLS/SSL error" (certificat auto-signé, Phase 7.3)
+    - Frontend Streamlit → http://frontend:8501/_stcore/health
+    - Intervalle : 60s
+
+    Etape 1 :
+    1. Dans le menu de gauche, cliquer sur le bouton "Ajouter une nouvelle sonde" (en haut).
+    2. Renseigne les champs :
+       - Monitor Type : HTTP(s)
+       - Friendly Name : Data API
+       - URL : http://data-api:8001/health
+       - Heartbeat Interval : 60 (secondes) — laisse le reste par défaut (Retries, etc.)
+    3. Descends jusqu'à Accepted Status Codes : laisse 200-299 (par défaut).
+    4. Clique sur Save (le statut passe au vert ("Up" / "Actif"))
+
+    Etape 2, pour Intelligence API, ajoute une nouvelle sonde avec :
+      - Type de sonde : HTTP(s)
+      - Nom : Intelligence API
+      - URL : https://intelligence-api:8000/health
+      - Intervalle : 60 secondes
+      - Important : coche l'option "Ignorer les erreurs TLS/SSL" (ou "Ignore TLS/SSL error") — sinon le monitor va échouer à cause du certificat auto-signé de la Phase 7.3.
+  
+   Etape 3, le Frontend Streamlit :
+      - Type de sonde : HTTP(s)
+      - Nom : Frontend Streamlit
+      - URL : http://frontend:8501/_stcore/health
+      - Intervalle : 60 secondes
+      - Codes de statut acceptés : 200-299 (par défaut)
+      - Pas besoin d'ignorer TLS ici (HTTP simple, pas de certificat).

@@ -1,75 +1,81 @@
 # Structure du projet
 
+```
 horragor-project/
-├── data/
-│   └── faiss_index/          # Index vectoriel généré en Phase 1
-│   │   ├── horror_index.faiss
-│   │   └── metadata.pkl
-│   └── build_faiss_index.py 
-├── data_api/      ← (NOUVEAU)
-│   ├── __init__.py
-│   ├── config.py             # Config logs (Phase 8.2)  [NOUVEAU]
-│   ├── database.py
-│   ├── models.py
-│   ├── main.py
-│   ├── observability/         # [NOUVEAU]
-│   │   ├── __init__.py
-│   │   └── logging_config.py
-│   └── routers/
-│       ├── __init__.py
-│       └── films.py
-├── docker
-│   ├── data_api.Dockerfile
-│   ├── frontend.Dockerfile
-│   └── intelligence_api.Dockerfile
-├── scripts
-│   ├── faiss_to_pgvector.py
-│   └── generate_cert.py
-├── .streamlit/
-│   └── config.toml           # Thème "Horror" (Phase 0.4)
-├── observability/              # Logging Streamlit (Phase 8.2)  [NOUVEAU]
-│   ├── __init__.py
-│   └── logging_config.py
-├── src/
-│   ├── __init__.py
-│   ├── main.py               # Serveur FastAPI (API Intelligence)
-│   ├── config.py             # Config Ollama, clés API, chemins
-│   │──api/
-│   │   ├── __init__.py
+├── data/                       # Données + script de génération de l'index vectoriel
+│   └── faiss_index/            # Index vectoriel généré en Phase 1
+│   │   ├── horror_index.faiss  # Index binaire FAISS (embeddings 768D)
+│   │   └── metadata.pkl        # Métadonnées liées aux vecteurs (id_film, titre, année)
+│   └── build_faiss_index.py    # Script one-shot : génère l'index FAISS depuis Supabase
+├── data_api/                   # Micro-service FastAPI d'accès aux données (Phase 6)
+│   ├── __init__.py             # Marqueur de package Python
+│   ├── config.py               # Config logs (Phase 8.2)
+│   ├── database.py             # Connexion PostgreSQL + wrapper de logging SQL (Phase 8.2)
+│   ├── models.py               # Schémas Pydantic (requêtes/réponses de l'API Données)
+│   ├── main.py                 # Point d'entrée FastAPI du service Données (port 8001)
+│   ├── observability/          # Logging Loguru autonome du service Données (Phase 8.2)
+│   │   ├── __init__.py         # Marqueur de package Python
+│   │   └── logging_config.py   # Config Loguru (JSON, rotation, interception stdlib)
+│   └── routers/                # Endpoints métiers (recherche, fiche film, similarité)
+│       ├── __init__.py         # Marqueur de package Python
+│       └── films.py            # Routes /films (recherche, fuzzy, détail, similarité pgvector)
+├── docker                      # Dockerfiles des 3 services
+│   ├── data_api.Dockerfile     # Image du service Données (port 8001)
+│   ├── frontend.Dockerfile     # Image du frontend Streamlit (port 8501)
+│   └── intelligence_api.Dockerfile  # Image du service Intelligence (port 8000, HTTPS)
+├── grafana/                    # Provisioning Grafana (Phase 8.3)
+│   └── provisioning/           # Auto-configuration au démarrage de Grafana
+│       └── datasources/        # Datasource provisionnée automatiquement
+│           └── datasource.yml  # Déclare Prometheus comme source de données par défaut
+├── scripts                     # Scripts utilitaires ponctuels
+│   ├── faiss_to_pgvector.py    # Copie les vecteurs FAISS existants vers la colonne pgvector
+│   └── generate_cert.py        # Génère un certificat TLS auto-signé (Phase 7.3)
+├── .streamlit/                 # Configuration Streamlit
+│   └── config.toml             # Thème "Horror" (Phase 0.4)
+├── observability/              # Logging Streamlit (Phase 8.2)
+│   ├── __init__.py             # Marqueur de package Python
+│   └── logging_config.py       # Config Loguru autonome du frontend Streamlit
+├── src/                        # API Intelligence (LangGraph, RAG, narration)
+│   ├── __init__.py             # Marqueur de package Python
+│   ├── main.py                 # Serveur FastAPI (API Intelligence)
+│   ├── config.py               # Config Ollama, clés API, chemins
+│   │──api/                     # Endpoints d'authentification
+│   │   ├── __init__.py         # Marqueur de package Python
 │   │   └── auth.py  
-│   │──observability/
-│   │   ├── __init__.py
-│   │   ├── logging_config.py
-│   │   ├── json_serializer.py
+│   │──observability/           # Logging Loguru + intégration Langfuse
+│   │   ├── __init__.py         # Marqueur de package Python
+│   │   ├── logging_config.py   # Config Loguru (JSON, rotation, interception stdlib)
+│   │   ├── json_serializer.py  # Aplatit les logs Loguru en JSON pour le monitoring
 │   │   └── langfuse_client.py  
-│   │──auth/
-│   │   ├── __init__.py
-│   │   └── security.py  
-│   │──models/
-│   │   ├── __init__.py
-│   │   └── state.py          # State partagé (mémoire commune)
-│   ├── tools/
-│   │   ├── __init__.py
-│   │   ├── rag_tool.py       # Recherche FAISS + SQL + pgvector
-│   │   ├── scraper_tool.py   # Recherche Web (Wikipedia)
-│   │   └── horror_tools.py   # Outils annexes (âge, simulateur de survie)
-│   └── graph/
-│       ├── __init__.py
-│       ├── nodes.py          # Logique RAG, Scraper, Narration
-│       ├── router.py         # Fonctions d'aiguillage conditionnel
-│       └── pipeline.py       # Câblage et compilation du graphe
-├── docs/                     # Sphinx (Phase 9)
-├── tests/                    # Tests unitaires & intégration
-├── logs/                      # Logs Loguru des 3 services, montés en volume (Phase 8.2)  [NOUVEAU]
-├── pyproject.toml
-├── app_frontend.py           # UI Streamlit (Phase 5)
-├── .gitignore
-├── docker-compose.dev.yml
-├── docker-compose.yml
-├── .env
-├── .env.docker
-└── .env.example
-
+│   │──auth/                    # Sécurité : bcrypt + JWT
+│   │   ├── __init__.py         # Marqueur de package Python
+│   │   └── security.py         # Hash mots de passe + création/validation des JWT
+│   │──models/                  # Schémas de données partagés
+│   │   ├── __init__.py         # Marqueur de package Python
+│   │   └── state.py            # State partagé (mémoire commune)
+│   ├── tools/                  # Outils appelés par les nœuds du graphe
+│   │   ├── __init__.py         # Marqueur de package Python
+│   │   ├── rag_tool.py         # Recherche FAISS + SQL + pgvector
+│   │   ├── scraper_tool.py     # Recherche Web (Wikipedia)
+│   │   └── horror_tools.py     # Outils annexes (âge, simulateur de survie)
+│   └── graph/                  # Construction du graphe multi-agent LangGraph
+│       ├── __init__.py         # Marqueur de package Python
+│       ├── nodes.py            # Logique RAG, Scraper, Narration
+│       ├── router.py           # Fonctions d'aiguillage conditionnel
+│       └── pipeline.py         # Câblage et compilation du graphe
+├── docs/                       # Sphinx (Phase 9)
+├── tests/                      # Tests unitaires & intégration
+├── logs/                       # Logs Loguru des 3 services, montés en volume (Phase 8.2)
+├── pyproject.toml              # Dépendances et métadonnées du projet (uv)
+├── app_frontend.py             # UI Streamlit (Phase 5)
+├── .gitignore                  # Fichiers/dossiers exclus de Git
+├── docker-compose.dev.yml      # Override dev : ports exposés + volumes de logs
+├── docker-compose.yml          # Orchestration des 5 services (prod-like)
+├── prometheus.yml              # Config scraping Prometheus (Phase 8.3)
+├── .env                        # Variables d'environnement locales (secrets, non commité)
+├── .env.docker                 # Variables d'environnement pour les conteneurs Docker
+└── .env.example                # Modèle de .env à dupliquer (sans secrets)
+```
 
 # demarrer le projet #
 
@@ -78,6 +84,9 @@ si les conteneurs docker sont demarre:
 langfuse => http://localhost:3000/
 streamlit => http://localhost:8501/
 fast api => https://localhost:8000/docs
+prometheus => http://localhost:9092
+grafana => http://localhost:3002 
+uptime kuma => http://localhost:3003
 
 si non  
 

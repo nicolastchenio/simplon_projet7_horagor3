@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, status, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from loguru import logger
+from prometheus_fastapi_instrumentator import Instrumentator
 
 # ─────────────────────────────────────────────────────────────────
 # Configuration du logging Loguru — en premier pour capter toute
@@ -404,3 +405,9 @@ async def health_check(request: Request):
         "service": "horragor-api",
         "timestamp": datetime.utcnow().isoformat()
     }
+
+
+# Expose GET /metrics (Phase 8.3) pour le scraping Prometheus.
+# /health est exclu du comptage pour ne pas polluer les métriques
+# avec le bruit des pings répétés d'Uptime Kuma.
+Instrumentator(excluded_handlers=["/health"]).instrument(app).expose(app)
